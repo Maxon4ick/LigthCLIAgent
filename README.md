@@ -347,14 +347,3 @@ npm run preflight
 rg -n --hidden -i "api[_-]?key|secret|token|password|bearer|authorization|private[_-]?key" .
 ```
 
-Do not commit:
-
-- `.env` or `.env.*`
-- `.agent-cli/`
-- `.claude/`
-- local SQLite or DB files
-- private key files such as `*.pem`, `*.key`, `id_rsa*`, or `id_ed25519*`
-- `node_modules/`
-- `dist/`
-
-This checkout also ignores `opencode/` and `qwen-code/` as local upstream/reference repositories. Remove those ignore rules only if you intentionally want to publish them as submodules or vendored source.
