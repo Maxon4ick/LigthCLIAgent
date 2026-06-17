@@ -1,0 +1,35 @@
+node_modules/
+dist/
+.env
+.env.*
+*.log
+coverage/
+.agent-cli/
+.claude/
+
+# Local runtime state, caches, and credential material.
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*.local.json
+
+# Upstream/reference checkouts. Remove these rules only if you intentionally
+# want to publish them as submodules or vendored source.
+/opencode/
+/qwen-code/
+
+# Local prompt drafts written as markdown.
+/*PROMPT*.md
+/*prompt*.md
+/prompts/*.md
+/prompts/**/*.md
+/.prompts/*.md
+/.prompts/**/*.md
+
+*REPORT*.md
+*PROMPT*.md

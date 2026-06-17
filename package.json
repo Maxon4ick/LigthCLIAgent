@@ -1,0 +1,30 @@
+{
+  "name": "agent-cli-scaffold",
+  "version": "0.1.0",
+  "description": "Production-oriented scaffold for a local agent CLI and daemon runtime.",
+  "type": "module",
+  "bin": {
+    "agent-cli": "dist/src/cli/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "smoke": "node test/smoke-cli.mjs",
+    "preflight": "npm run build && npm run typecheck && npm test && npm run smoke"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.29",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.2"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1"
+  }
+}
