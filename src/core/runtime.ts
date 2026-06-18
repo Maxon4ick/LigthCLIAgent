@@ -63,6 +63,7 @@ export function createRuntime(config: AppConfig, cwd: string): Runtime {
     store: sessions,
     eventBus: events,
     provider: createProviderAdapter(config),
+    providerFactory: (model) => createProviderAdapter({ ...config, model }),
     toolRegistry,
     permissionPolicy: approvals,
     config,
@@ -282,8 +283,7 @@ export function switchModel(
   ref: ModelRef,
   options: SwitchModelOptions = {},
 ): Session {
-  if (options.baseUrl) runtime.config.providers.openaiCompatible.baseUrl = options.baseUrl
-  if (options.apiKey) runtime.config.providers.openaiCompatible.apiKey = options.apiKey
+  applyProviderConnectionOptions(runtime.config, ref.provider, options)
 
   const alreadyInCatalog = runtime.config.models.catalog.some(
     (entry) => entry.provider === ref.provider && entry.model === ref.model,
@@ -310,11 +310,49 @@ export function switchModel(
   runtime.runner.setProvider(provider)
 
   const session = runtime.sessions.updateSession(sessionId, { model: ref })
+  runtime.db?.setActiveModel(ref)
   runtime.models.current = resolveModel(runtime.config)
   runtime.models.catalog = listModelCatalog(runtime.config)
 
   runtime.events.publish({ type: "session.updated", payload: { sessionId, session } })
   return session
+}
+
+function applyProviderConnectionOptions(config: AppConfig, provider: string, options: SwitchModelOptions): void {
+  if (!options.baseUrl && !options.apiKey) return
+
+  if (provider === "anthropic") {
+    if (options.baseUrl) config.providers.anthropic.baseUrl = options.baseUrl
+    if (options.apiKey) config.providers.anthropic.apiKey = options.apiKey
+    return
+  }
+
+  if (provider === "gemini") {
+    if (options.baseUrl) config.providers.gemini.baseUrl = options.baseUrl
+    if (options.apiKey) config.providers.gemini.apiKey = options.apiKey
+    return
+  }
+
+  if (provider === "openai-compatible" || (isOpenAIAlias(provider) && !config.providers.custom[provider])) {
+    if (options.baseUrl) config.providers.openaiCompatible.baseUrl = options.baseUrl
+    if (options.apiKey) config.providers.openaiCompatible.apiKey = options.apiKey
+    return
+  }
+
+  const existing = config.providers.custom[provider]
+  config.providers.custom[provider] = {
+    ...(existing ?? {
+      protocol: "openai-compatible" as const,
+      baseUrl: options.baseUrl ?? config.providers.openaiCompatible.baseUrl,
+      apiKeyEnv: `${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`,
+    }),
+    ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+    ...(options.apiKey ? { apiKey: options.apiKey } : {}),
+  }
+}
+
+function isOpenAIAlias(provider: string): boolean {
+  return provider === "openai" || provider === "openai-chat"
 }
 
 function summarizeMessages(messages: Message[]): string {

@@ -25,7 +25,7 @@ export function createProviderAdapter(config: AppConfig): ProviderAdapter {
     return new MockProvider()
   }
 
-  if (provider === "openai-compatible" || provider === "openai" || provider === "openai-chat") {
+  if (provider === "openai-compatible") {
     return createOpenAICompatibleProvider(config)
   }
 
@@ -39,6 +39,10 @@ export function createProviderAdapter(config: AppConfig): ProviderAdapter {
 
   const custom = config.providers.custom[provider]
   if (!custom) {
+    if (provider === "openai" || provider === "openai-chat") {
+      return createOpenAICompatibleProvider(config)
+    }
+
     throw new Error(`Unknown provider: ${provider}`)
   }
   if (custom.disabled) {
@@ -109,9 +113,10 @@ function protocolForProvider(config: AppConfig, provider: string): ProviderProto
   if (provider === "mock") return "mock"
   if (provider === "anthropic") return "anthropic-messages"
   if (provider === "gemini") return "gemini-generative-language"
-  if (provider === "openai" || provider === "openai-chat") return "openai-chat"
   if (provider === "openai-compatible") return "openai-compatible"
-  return config.providers.custom[provider]?.protocol ?? "openai-compatible"
+  if (config.providers.custom[provider]) return config.providers.custom[provider].protocol
+  if (provider === "openai" || provider === "openai-chat") return "openai-chat"
+  return "openai-compatible"
 }
 
 function resolveApiConnection(
