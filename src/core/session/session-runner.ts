@@ -1,5 +1,5 @@
 import path from "node:path"
-import type { AppConfig } from "../config/schema.js"
+import type { AppConfig, ModelRef } from "../config/schema.js"
 import { materializeSystemContext } from "../context/system-context.js"
 import type { EventBus } from "../events/event-bus.js"
 import type { ProviderAdapter } from "../llm/provider.js"
@@ -16,6 +16,7 @@ export interface SessionRunnerOptions {
   store: SessionStore
   eventBus: EventBus
   provider: ProviderAdapter
+  providerFactory?: (model: ModelRef) => ProviderAdapter
   toolRegistry: ToolRegistry
   permissionPolicy: PermissionPolicy
   config: AppConfig
@@ -40,8 +41,13 @@ export class SessionRunner {
     this.currentProvider = provider
   }
 
+  private providerFor(model: ModelRef): ProviderAdapter {
+    return this.options.providerFactory?.(model) ?? this.currentProvider
+  }
+
   async run(sessionId: string, abortSignal: AbortSignal = new AbortController().signal): Promise<SessionRunResult> {
     const session = this.options.store.updateStatus(sessionId, "running")
+    const provider = this.providerFor(session.model)
     let assistantText = ""
     let usage: TokenUsage | undefined
     const allToolResults: ToolExecution[] = []
@@ -66,7 +72,7 @@ export class SessionRunner {
         let iterText = ""
         let iterUsage: TokenUsage | undefined
 
-        for await (const event of this.currentProvider.stream({ session, systemContext, messages, tools, abortSignal })) {
+        for await (const event of provider.stream({ session, systemContext, messages, tools, abortSignal })) {
           if (abortSignal.aborted) break
 
           if (event.type === "text_delta") {

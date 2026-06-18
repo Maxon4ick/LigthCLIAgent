@@ -236,5 +236,18 @@ function createProviderOverrides(args: ServeArgs): PartialDeep<AppConfig>["provi
     return { gemini: patch }
   }
 
+  if (provider !== "openai-compatible") {
+    return {
+      custom: {
+        [provider]: {
+          protocol: provider === "openai-chat" ? "openai-chat" : "openai-compatible",
+          baseUrl: args.baseUrl ?? "https://api.openai.com/v1/chat/completions",
+          ...(args.apiKey ? { apiKey: args.apiKey } : {}),
+          apiKeyEnv: args.apiKeyEnv ?? `${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`,
+        },
+      },
+    }
+  }
+
   return { openaiCompatible: patch }
 }

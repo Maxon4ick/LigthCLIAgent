@@ -4,7 +4,7 @@ import path from "node:path"
 import { describe, expect, it } from "vitest"
 import { defaultConfig, mergeConfig, type AppConfig, type ModelCatalogEntry } from "../src/core/config/schema.js"
 import { listModelCatalog } from "../src/core/llm/model-registry.js"
-import { createRuntime, createSession, type Runtime } from "../src/core/runtime.js"
+import { createRuntime, createSession, switchModel, type Runtime } from "../src/core/runtime.js"
 
 describe("SQLite connection persistence", () => {
   it("restores the connected provider, key, model catalog entry, and active model", async () => {
@@ -44,7 +44,7 @@ describe("SQLite connection persistence", () => {
     }
   })
 
-  it("uses stored OpenAI alias keys for the OpenAI-compatible provider after restart", async () => {
+  it("restores stored OpenAI aliases as their own connection after restart", async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), "agent-cli-openai-alias-"))
     const config = sqliteConfig()
 
@@ -66,10 +66,113 @@ describe("SQLite connection persistence", () => {
     const secondRuntime = createRuntime(config, cwd)
     try {
       expect(secondRuntime.config.model).toEqual({ provider: "openai", model: "gpt-test" })
-      expect(secondRuntime.config.providers.openaiCompatible).toMatchObject({
+      expect(secondRuntime.config.providers.custom.openai).toMatchObject({
         baseUrl: "https://example.openai.test/v1",
         apiKey: "test-openai-key",
+        protocol: "openai-chat",
       })
+    } finally {
+      secondRuntime.db?.close()
+    }
+  })
+
+  it("keeps separate endpoints and keys for named OpenAI-compatible custom connections", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "agent-cli-openai-custom-connections-"))
+    const config = sqliteConfig()
+
+    const firstRuntime = createRuntime(config, cwd)
+    try {
+      const db = requireDb(firstRuntime)
+      db.setProviderConfig("openrouter", {
+        baseUrl: "https://openrouter.example.test/api/v1",
+        protocol: "openai-compatible",
+        apiKeyEnv: "OPENROUTER_API_KEY",
+      })
+      db.setApiKey("openrouter", "test-openrouter-key")
+      db.upsertCustomModel(modelEntry("openrouter", "openrouter-model", "openai-compatible"))
+
+      db.setProviderConfig("local-llm", {
+        baseUrl: "http://127.0.0.1:11434/v1",
+        protocol: "openai-compatible",
+        apiKeyEnv: "LOCAL_LLM_API_KEY",
+      })
+      db.setApiKey("local-llm", "test-local-key")
+      db.upsertCustomModel(modelEntry("local-llm", "local-model", "openai-compatible"))
+      db.setActiveModel({ provider: "local-llm", model: "local-model" })
+    } finally {
+      firstRuntime.db?.close()
+    }
+
+    const secondRuntime = createRuntime(config, cwd)
+    try {
+      expect(secondRuntime.config.model).toEqual({ provider: "local-llm", model: "local-model" })
+      expect(secondRuntime.config.providers.custom.openrouter).toMatchObject({
+        baseUrl: "https://openrouter.example.test/api/v1",
+        apiKey: "test-openrouter-key",
+      })
+      expect(secondRuntime.config.providers.custom["local-llm"]).toMatchObject({
+        baseUrl: "http://127.0.0.1:11434/v1",
+        apiKey: "test-local-key",
+      })
+      expect(secondRuntime.config.providers.openaiCompatible.apiKey).toBeUndefined()
+      expect(secondRuntime.config.providers.openaiCompatible.baseUrl).toBe(defaultConfig.providers.openaiCompatible.baseUrl)
+      expect(secondRuntime.config.models.catalog).toContainEqual(
+        expect.objectContaining({ provider: "openrouter", model: "openrouter-model" }),
+      )
+      expect(secondRuntime.config.models.catalog).toContainEqual(
+        expect.objectContaining({ provider: "local-llm", model: "local-model" }),
+      )
+    } finally {
+      secondRuntime.db?.close()
+    }
+  })
+
+  it("stores OpenAI-compatible keys by exact provider name", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "agent-cli-openai-exact-keys-"))
+    const runtime = createRuntime(sqliteConfig(), cwd)
+    try {
+      const db = requireDb(runtime)
+      db.setApiKey("openai-compatible", "test-compatible-key")
+      db.setApiKey("openai", "test-openai-key")
+
+      expect(db.getApiKey("openai-compatible")).toBe("test-compatible-key")
+      expect(db.getApiKey("openai")).toBe("test-openai-key")
+      expect(db.listApiKeys().map((entry) => entry.provider)).toEqual(["openai", "openai-compatible"])
+    } finally {
+      runtime.db?.close()
+    }
+  })
+
+  it("persists model switches made after a session is already open", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "agent-cli-switch-active-model-"))
+    const config = sqliteConfig()
+
+    const setupRuntime = createRuntime(config, cwd)
+    try {
+      const db = requireDb(setupRuntime)
+      db.setProviderConfig("minimax", {
+        baseUrl: "https://example.minimax.test/v1",
+        protocol: "openai-compatible",
+        apiKeyEnv: "MINIMAX_API_KEY",
+      })
+      db.setApiKey("minimax", "test-minimax-key")
+      db.upsertCustomModel(modelEntry("minimax", "MiniMax-M2.1-highspeed", "openai-compatible"))
+    } finally {
+      setupRuntime.db?.close()
+    }
+
+    const firstRuntime = createRuntime(config, cwd)
+    try {
+      const session = createSession(firstRuntime)
+      switchModel(firstRuntime, session.id, { provider: "minimax", model: "MiniMax-M2.1-highspeed" })
+    } finally {
+      firstRuntime.db?.close()
+    }
+
+    const secondRuntime = createRuntime(config, cwd)
+    try {
+      expect(secondRuntime.config.model).toEqual({ provider: "minimax", model: "MiniMax-M2.1-highspeed" })
+      expect(createSession(secondRuntime).model).toEqual({ provider: "minimax", model: "MiniMax-M2.1-highspeed" })
     } finally {
       secondRuntime.db?.close()
     }

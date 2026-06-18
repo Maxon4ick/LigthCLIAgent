@@ -82,15 +82,21 @@ export class SqliteDatabase {
   // --- API Keys ---
 
   getApiKey(provider: string): string | undefined {
-    const storedProvider = normalizeStoredProvider(provider)
     const row = this.db
       .prepare("SELECT api_key FROM api_keys WHERE provider = ?")
-      .get(storedProvider) as { api_key: string } | undefined
+      .get(provider) as { api_key: string } | undefined
     if (row?.api_key) return row.api_key
 
-    if (storedProvider === "openai-compatible") {
+    if (provider === "openai-compatible") {
       const legacyRow = this.db
-        .prepare("SELECT api_key FROM api_keys WHERE provider IN ('openai', 'openai-chat') ORDER BY updated_at DESC LIMIT 1")
+        .prepare(`
+          SELECT k.api_key
+          FROM api_keys k
+          LEFT JOIN provider_configs pc ON pc.provider = k.provider
+          WHERE k.provider IN ('openai', 'openai-chat') AND pc.provider IS NULL
+          ORDER BY k.updated_at DESC
+          LIMIT 1
+        `)
         .get() as { api_key: string } | undefined
       return legacyRow?.api_key
     }
@@ -104,15 +110,11 @@ export class SqliteDatabase {
         `INSERT INTO api_keys (provider, api_key, updated_at) VALUES (?, ?, ?)
          ON CONFLICT(provider) DO UPDATE SET api_key = excluded.api_key, updated_at = excluded.updated_at`,
       )
-      .run(normalizeStoredProvider(provider), apiKey, new Date().toISOString())
+      .run(provider, apiKey, new Date().toISOString())
   }
 
   deleteApiKey(provider: string): void {
-    const storedProvider = normalizeStoredProvider(provider)
-    this.db.prepare("DELETE FROM api_keys WHERE provider = ?").run(storedProvider)
-    if (storedProvider === "openai-compatible") {
-      this.db.prepare("DELETE FROM api_keys WHERE provider IN ('openai', 'openai-chat')").run()
-    }
+    this.db.prepare("DELETE FROM api_keys WHERE provider = ?").run(provider)
   }
 
   listApiKeys(): { provider: string; updatedAt: string }[] {
@@ -212,7 +214,7 @@ export class SqliteDatabase {
            api_key_env = excluded.api_key_env,
            updated_at = excluded.updated_at`,
       )
-      .run(normalizeStoredProvider(provider), cfg.baseUrl, cfg.protocol, cfg.apiKeyEnv, new Date().toISOString())
+      .run(provider, cfg.baseUrl, cfg.protocol, cfg.apiKeyEnv, new Date().toISOString())
   }
 
   listProviderConfigs(): Array<{ provider: string; baseUrl: string; protocol: ProviderProtocol; apiKeyEnv: string }> {
@@ -256,7 +258,7 @@ export class SqliteDatabase {
     for (const pc of providerConfigs) {
       if (pc.provider === "anthropic") {
         providers.anthropic = { ...providers.anthropic, baseUrl: pc.baseUrl, apiKeyEnv: pc.apiKeyEnv }
-      } else if (isOpenAICompatibleAlias(pc.provider)) {
+      } else if (pc.provider === "openai-compatible") {
         providers.openaiCompatible = { ...providers.openaiCompatible, baseUrl: pc.baseUrl, apiKeyEnv: pc.apiKeyEnv }
       } else if (pc.provider === "gemini") {
         providers.gemini = { ...providers.gemini, baseUrl: pc.baseUrl, apiKeyEnv: pc.apiKeyEnv }
@@ -274,7 +276,7 @@ export class SqliteDatabase {
     for (const [provider, apiKey] of allKeys) {
       if (provider === "anthropic") {
         providers.anthropic = { ...providers.anthropic, apiKey }
-      } else if (isOpenAICompatibleAlias(provider)) {
+      } else if (provider === "openai-compatible") {
         providers.openaiCompatible = { ...providers.openaiCompatible, apiKey }
       } else if (provider === "gemini") {
         providers.gemini = { ...providers.gemini, apiKey }
@@ -282,6 +284,11 @@ export class SqliteDatabase {
         providers.custom[provider] = { ...providers.custom[provider], apiKey }
       }
       // Custom provider without a saved config is skipped — key alone isn't enough to connect
+    }
+
+    if (!providers.openaiCompatible.apiKey) {
+      const legacyOpenAiKey = this.getApiKey("openai-compatible")
+      if (legacyOpenAiKey) providers.openaiCompatible = { ...providers.openaiCompatible, apiKey: legacyOpenAiKey }
     }
 
     // Merge custom models into catalog
@@ -327,12 +334,4 @@ function rowToModel(row: RawCustomModel): ModelCatalogEntry {
     capabilities: JSON.parse(row.capabilities) as ModelCapabilities,
     cost: row.cost ? (JSON.parse(row.cost) as ModelCost) : undefined,
   }
-}
-
-function normalizeStoredProvider(provider: string): string {
-  return isOpenAICompatibleAlias(provider) ? "openai-compatible" : provider
-}
-
-function isOpenAICompatibleAlias(provider: string): boolean {
-  return provider === "openai" || provider === "openai-chat" || provider === "openai-compatible"
 }

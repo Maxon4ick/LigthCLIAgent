@@ -352,7 +352,7 @@ export async function tuiCommand(args: string[]): Promise<void> {
         // Step 1: provider
         const providerIn = await input.question(`Provider [${curProvider}]: `)
         if (providerIn === undefined) break
-        const providerName = providerIn.trim() || curProvider
+        let providerName = providerIn.trim() || curProvider
 
         // Step 2: base URL (skipped for pure API-key providers like anthropic / gemini)
         const needsBaseUrl = !["anthropic", "gemini"].includes(providerName)
@@ -363,6 +363,7 @@ export async function tuiCommand(args: string[]): Promise<void> {
           if (urlIn === undefined) break
           baseUrl = urlIn.trim() || defaultUrl
         }
+        providerName = maybePromoteOpenAICompatibleConnection(config, providerName, baseUrl)
 
         // Step 3: API key (enter to keep existing)
         const existingKey = getProviderApiKey(config, providerName) ?? runtime.db?.getApiKey(providerName)
@@ -487,7 +488,16 @@ export async function tuiCommand(args: string[]): Promise<void> {
           ...builtinProviders,
           ...Object.keys(config.providers.custom),
         ])
-        if (slashIndex === -1 || !knownProviders.has(command.ref.slice(0, slashIndex))) {
+        if (slashIndex === -1) {
+          const exactMatches = listModelCatalog(config).filter((entry) => entry.model === command.ref)
+          if (exactMatches.length === 1 && exactMatches[0]) {
+            provider = exactMatches[0].provider
+            modelName = exactMatches[0].model
+          } else {
+            provider = currentSession.model.provider === "mock" ? "openai-compatible" : currentSession.model.provider
+            modelName = command.ref
+          }
+        } else if (!knownProviders.has(command.ref.slice(0, slashIndex))) {
           // No slash, or slash is part of the model ID (e.g. "meta-llama/Llama-3")
           provider = currentSession.model.provider === "mock" ? "openai-compatible" : currentSession.model.provider
           modelName = command.ref
@@ -661,18 +671,15 @@ export async function tuiCommand(args: string[]): Promise<void> {
         // Apply immediately so the current session can use the key.
         if (providerName === "anthropic") {
           config.providers.anthropic.apiKey = apiKeyValue
-        } else if (isOpenAICompatibleProvider(providerName)) {
-          config.providers.openaiCompatible.apiKey = apiKeyValue
         } else if (providerName === "gemini") {
           config.providers.gemini.apiKey = apiKeyValue
         } else if (config.providers.custom[providerName]) {
           config.providers.custom[providerName].apiKey = apiKeyValue
+        } else if (usesSharedOpenAIConfig(config, providerName)) {
+          config.providers.openaiCompatible.apiKey = apiKeyValue
         }
         // Refresh the provider adapter so the new key takes effect without restart
-        if (
-          providerName === runtime.config.model.provider ||
-          (isOpenAICompatibleProvider(providerName) && isOpenAICompatibleProvider(runtime.config.model.provider))
-        ) {
+        if (keyChangeAffectsActiveProvider(runtime.config, providerName, runtime.config.model.provider)) {
           try {
             runtime.runner.setProvider(createProviderAdapter(runtime.config))
           } catch {
@@ -716,12 +723,12 @@ export async function tuiCommand(args: string[]): Promise<void> {
         // Clear from the effective runtime config.
         if (providerName === "anthropic") {
           config.providers.anthropic.apiKey = undefined
-        } else if (isOpenAICompatibleProvider(providerName)) {
-          config.providers.openaiCompatible.apiKey = undefined
         } else if (providerName === "gemini") {
           config.providers.gemini.apiKey = undefined
         } else if (config.providers.custom[providerName]) {
           config.providers.custom[providerName].apiKey = undefined
+        } else if (usesSharedOpenAIConfig(config, providerName)) {
+          config.providers.openaiCompatible.apiKey = undefined
         }
 
         notice = `API key for "${providerName}" deleted`
@@ -2114,6 +2121,19 @@ function createProviderOverrides(args: TuiArgs): PartialDeep<AppConfig>["provide
     return { gemini: patch }
   }
 
+  if (provider !== "openai-compatible") {
+    return {
+      custom: {
+        [provider]: {
+          protocol: provider === "openai-chat" ? "openai-chat" : "openai-compatible",
+          baseUrl: args.baseUrl ?? "https://api.openai.com/v1/chat/completions",
+          ...(args.apiKey ? { apiKey: args.apiKey } : {}),
+          apiKeyEnv: args.apiKeyEnv ?? `${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`,
+        },
+      },
+    }
+  }
+
   return { openaiCompatible: patch }
 }
 
@@ -2131,15 +2151,17 @@ function readPositiveInt(value: string | undefined, name: string): number {
 function getProviderBaseUrl(config: AppConfig, provider: string): string {
   if (provider === "anthropic") return config.providers.anthropic.baseUrl
   if (provider === "gemini") return config.providers.gemini.baseUrl
+  if (config.providers.custom[provider]) return config.providers.custom[provider].baseUrl
   if (isOpenAICompatibleProvider(provider)) return config.providers.openaiCompatible.baseUrl
-  return config.providers.custom[provider]?.baseUrl ?? ""
+  return ""
 }
 
 function getProviderApiKey(config: AppConfig, provider: string): string | undefined {
   if (provider === "anthropic") return config.providers.anthropic.apiKey
   if (provider === "gemini") return config.providers.gemini.apiKey
+  if (config.providers.custom[provider]) return config.providers.custom[provider].apiKey
   if (isOpenAICompatibleProvider(provider)) return config.providers.openaiCompatible.apiKey
-  return config.providers.custom[provider]?.apiKey
+  return undefined
 }
 
 function builtinProtocol(provider: string): ProviderProtocol {
@@ -2156,7 +2178,7 @@ function applyProviderConfig(config: AppConfig, provider: string, apiKey: string
   } else if (provider === "gemini") {
     config.providers.gemini.apiKey = apiKey
     config.providers.gemini.baseUrl = baseUrl || config.providers.gemini.baseUrl
-  } else if (isOpenAICompatibleProvider(provider)) {
+  } else if (provider === "openai-compatible") {
     config.providers.openaiCompatible.apiKey = apiKey
     if (baseUrl) config.providers.openaiCompatible.baseUrl = baseUrl
   } else {
@@ -2175,8 +2197,74 @@ function applyProviderConfig(config: AppConfig, provider: string, apiKey: string
   }
 }
 
+function maybePromoteOpenAICompatibleConnection(config: AppConfig, provider: string, baseUrl: string): string {
+  if (provider !== "openai-compatible" || !baseUrl || isDefaultOpenAIBaseUrl(baseUrl)) {
+    return provider
+  }
+
+  const inferred = inferProviderNameFromBaseUrl(baseUrl)
+  if (!inferred || inferred === provider) {
+    return provider
+  }
+
+  if (!config.providers.custom[inferred] || sameBaseUrl(config.providers.custom[inferred].baseUrl, baseUrl)) {
+    return inferred
+  }
+
+  for (let index = 2; index < 100; index += 1) {
+    const candidate = `${inferred}-${index}`
+    if (!config.providers.custom[candidate] || sameBaseUrl(config.providers.custom[candidate].baseUrl, baseUrl)) {
+      return candidate
+    }
+  }
+
+  return inferred
+}
+
+function inferProviderNameFromBaseUrl(baseUrl: string): string | undefined {
+  try {
+    const url = new URL(baseUrl)
+    const host = url.hostname.toLowerCase()
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
+      return "local-openai"
+    }
+
+    const withoutApi = host.replace(/^api\./, "")
+    const label = withoutApi.split(".").find((part) => part.length > 0)
+    const provider = label?.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+    return provider || undefined
+  } catch {
+    return undefined
+  }
+}
+
+function isDefaultOpenAIBaseUrl(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase() === "api.openai.com"
+  } catch {
+    return false
+  }
+}
+
+function sameBaseUrl(left: string, right: string): boolean {
+  return trimTrailingSlash(left) === trimTrailingSlash(right)
+}
+
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, "")
+}
+
 function isOpenAICompatibleProvider(provider: string): boolean {
   return provider === "openai" || provider === "openai-chat" || provider === "openai-compatible"
+}
+
+function usesSharedOpenAIConfig(config: AppConfig, provider: string): boolean {
+  return provider === "openai-compatible" || (isOpenAICompatibleProvider(provider) && !config.providers.custom[provider])
+}
+
+function keyChangeAffectsActiveProvider(config: AppConfig, changedProvider: string, activeProvider: string): boolean {
+  if (changedProvider === activeProvider) return true
+  return usesSharedOpenAIConfig(config, changedProvider) && usesSharedOpenAIConfig(config, activeProvider)
 }
 
 function pickReplacementModel(config: AppConfig, removed: ModelRef): ModelRef {
