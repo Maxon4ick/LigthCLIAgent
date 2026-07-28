@@ -1,7 +1,7 @@
 import { loadConfig } from "../../core/config/config-loader.js"
 import type { ModelCapabilities, ProviderProtocol } from "../../core/config/schema.js"
 import { listModelCatalog } from "../../core/llm/model-registry.js"
-import { SqliteDatabase, resolveDbPath } from "../../core/storage/sqlite-db.js"
+import { openRuntimeState } from "../../core/storage/open-runtime-state.js"
 
 export async function modelsCommand(args: string[]): Promise<void> {
   const [subcommand, ...rest] = args
@@ -33,9 +33,9 @@ export async function modelsCommand(args: string[]): Promise<void> {
 
 async function modelsList(): Promise<void> {
   const config = await loadConfig({ cwd: process.cwd() })
-  const db = openDb(config.storage.dbPath)
+  const opened = await openRuntimeState(config, process.cwd())
   try {
-    const effective = db.applyOverrides(config)
+    const effective = opened.state.applyOverrides(config)
     const catalog = listModelCatalog(effective)
     if (catalog.length === 0) {
       process.stdout.write("No models in catalog.\n")
@@ -48,7 +48,7 @@ async function modelsList(): Promise<void> {
       process.stdout.write(`  ${entry.provider}/${name}  [${entry.protocol}]  ${caps}\n`)
     }
   } finally {
-    db.close()
+    await opened.dispose()
   }
 }
 
@@ -127,12 +127,12 @@ async function modelsAdd(args: string[]): Promise<void> {
   }
 
   const config = await loadConfig({ cwd: process.cwd() })
-  const db = openDb(config.storage.dbPath)
+  const opened = await openRuntimeState(config, process.cwd())
   try {
-    db.upsertCustomModel({ provider, model, displayName, protocol, capabilities })
+    opened.state.upsertCustomModel({ provider, model, displayName, protocol, capabilities })
     process.stdout.write(`Model "${provider}/${model}" saved.\n`)
   } finally {
-    db.close()
+    await opened.dispose()
   }
 }
 
@@ -143,17 +143,13 @@ async function modelsRemove(args: string[]): Promise<void> {
   }
 
   const config = await loadConfig({ cwd: process.cwd() })
-  const db = openDb(config.storage.dbPath)
+  const opened = await openRuntimeState(config, process.cwd())
   try {
-    db.deleteCustomModel(provider, model)
+    opened.state.deleteCustomModel(provider, model)
     process.stdout.write(`Model "${provider}/${model}" removed.\n`)
   } finally {
-    db.close()
+    await opened.dispose()
   }
-}
-
-function openDb(dbPath: string): SqliteDatabase {
-  return new SqliteDatabase(resolveDbPath(process.cwd(), dbPath))
 }
 
 function formatCaps(caps: ModelCapabilities): string {
@@ -167,7 +163,7 @@ function formatCaps(caps: ModelCapabilities): string {
 }
 
 function printModelsHelp(): void {
-  process.stdout.write(`Manage the model catalog (custom models persisted in SQLite).
+  process.stdout.write(`Manage the model catalog (persisted in local settings by default).
 
 Usage:
   agent-cli models list

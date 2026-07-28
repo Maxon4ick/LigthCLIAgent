@@ -23,7 +23,7 @@ import { ToolRegistry } from "../src/core/tools/registry.js"
 import { ToolScheduler } from "../src/core/tools/scheduler.js"
 import type { ToolDefinition } from "../src/core/tools/tool.js"
 import { EventBus } from "../src/core/events/event-bus.js"
-import { startHttpServer } from "../src/server/http-server.js"
+import { startHttpServer } from "../src/adapters/http/server.js"
 
 describe("security gap fixes", () => {
   it("asks before protected file reads and lets deny rules override allow rules", async () => {

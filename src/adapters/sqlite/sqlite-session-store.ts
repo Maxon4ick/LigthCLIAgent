@@ -1,8 +1,7 @@
-import type BetterSqlite3 from "better-sqlite3"
 import { NotFoundError } from "../../shared/errors.js"
 import { createId } from "../../shared/ids.js"
-import { redactMessageParts } from "../security/redaction.js"
-import type { Message, Session, SessionStatus, TodoItem, TokenUsage } from "./message-types.js"
+import { redactMessageParts } from "../../core/security/redaction.js"
+import type { Message, Session, SessionStatus, TodoItem, TokenUsage } from "../../core/session/message-types.js"
 import type {
   AddMessageInput,
   CompactSessionInput,
@@ -11,10 +10,11 @@ import type {
   ForkSessionInput,
   SessionStore,
   UpdateSessionPatch,
-} from "./session-store.js"
+} from "../../core/session/session-store.js"
+import type { SqliteDatabaseHandle } from "./sqlite-database.js"
 
 export class SqliteSessionStore implements SessionStore {
-  constructor(private readonly db: BetterSqlite3.Database) {}
+  constructor(private readonly db: SqliteDatabaseHandle) {}
 
   createSession(input: CreateSessionInput): Session {
     const now = new Date().toISOString()

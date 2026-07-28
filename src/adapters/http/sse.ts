@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http"
-import type { EventBus } from "../core/events/event-bus.js"
-import type { AppEvent } from "../core/events/event-types.js"
+import type { EventBus } from "../../core/events/event-bus.js"
+import type { AppEvent } from "../../core/events/event-types.js"
 
 export function writeSseStream(
   eventBus: EventBus,

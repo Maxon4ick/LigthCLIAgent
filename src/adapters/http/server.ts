@@ -1,5 +1,5 @@
 import http from "node:http"
-import type { Runtime } from "../core/runtime.js"
+import type { Runtime } from "../../core/runtime.js"
 import { handleRoutes } from "./routes.js"
 
 export interface StartedHttpServer {
@@ -25,13 +25,25 @@ export async function startHttpServer(runtime: Runtime): Promise<StartedHttpServ
   const port = typeof address === "object" && address ? address.port : runtime.config.server.port
   const host = runtime.config.server.host
 
+  let closePromise: Promise<void> | undefined
   return {
     url: `http://${host}:${port}`,
-    close: () =>
-      new Promise((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()))
-      }),
+    close: () => {
+      closePromise ??= closeHttpAdapter(runtime, server)
+      return closePromise
+    },
   }
+}
+
+async function closeHttpAdapter(runtime: Runtime, server: http.Server): Promise<void> {
+  const activeRuns = runtime.runs.list()
+  for (const run of activeRuns) runtime.stopSession(run.sessionId, "HTTP server shutdown")
+  await Promise.allSettled(activeRuns.map((run) => run.promise))
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()))
+    server.closeAllConnections()
+  })
+  await runtime.dispose()
 }
 
 function enforceServerExposurePolicy(runtime: Runtime): void {

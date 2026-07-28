@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { defaultConfig, mergeConfig } from "../src/core/config/schema.js"
 import { addUserPrompt, createRuntime, createSession } from "../src/core/runtime.js"
-import { startHttpServer } from "../src/server/http-server.js"
+import { startHttpServer } from "../src/adapters/http/server.js"
 
 describe("HTTP daemon discovery and session APIs", () => {
   it("exposes tools, models, OpenAPI metadata, and session workflow endpoints", async () => {

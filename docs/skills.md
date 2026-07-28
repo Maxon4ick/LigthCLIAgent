@@ -4,6 +4,28 @@ Skills are markdown files that package specialised instructions and workflows in
 reusable bundles. The agent discovers them automatically, lists them in the system
 prompt, and can load any skill on demand with the `use_skill` tool.
 
+Discovery builds a complete deterministic index; it is not capped at 20.
+Earlier configured workspace roots have higher priority. Diagnostics report
+missing roots, invalid/unreadable files, and duplicate names together with the
+selected winner.
+
+The prompt catalog has a separate `agent.skillPromptMaxChars` character budget.
+It keeps complete XML records, prefers retaining every skill name, and removes
+descriptions before names. Its summary reports total, fully shown, shortened,
+and omitted counts. Skills omitted from that compact catalog remain available
+through `list_skills` and `use_skill`; full bodies and `bodyPreview` are never
+added to the prompt automatically.
+`use_skill` also accepts a resource path relative to the skill directory and
+rejects path escapes.
+
+Bundle operations are separate: import copies skills and resources; install
+may copy bundle metadata/resources under `.agents/bundles`. Hooks and executable
+tools are reported as detected but inactive in P0. They are never executed or
+activated, and installation never changes `.claude/settings.local.json`.
+`--dry-run` performs discovery only and writes nothing; repeated installation
+preserves an existing `SKILL.md` by default. Bundle metadata/registry JSON is
+validated before it can be replaced, and symlink escapes are rejected.
+
 ---
 
 ## How skills work end-to-end

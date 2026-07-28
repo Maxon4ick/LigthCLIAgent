@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 import type { AppConfig } from "../src/core/config/schema.js"
 import { defaultConfig } from "../src/core/config/schema.js"
 import { createRuntime } from "../src/core/runtime.js"
-import { startHttpServer } from "../src/server/http-server.js"
+import { startHttpServer } from "../src/adapters/http/server.js"
 
 describe("HTTP daemon auth", () => {
   it("keeps health public and protects session routes when bearer auth is configured", async () => {

@@ -9,7 +9,7 @@ import {
   renderSlashCommandMenu,
   renderWelcome,
   suggestSlashCommands,
-} from "../src/cli/tui/render.js"
+} from "../src/adapters/tui/render/index.js"
 import { defaultConfig, type AppConfig } from "../src/core/config/schema.js"
 import type { PendingApproval } from "../src/core/permissions/approvals.js"
 import type { Message, Session } from "../src/core/session/message-types.js"
@@ -35,7 +35,14 @@ describe("TUI render helpers", () => {
   })
 
   it("suggests slash commands for prompt dropdown", () => {
-    expect(suggestSlashCommands("/s").map((item) => item.command)).toEqual(["/sessions", "/status", "/switch <model>"])
+    expect(suggestSlashCommands("/s").map((item) => item.command)).toEqual([
+      "/sessions",
+      "/status",
+      "/switch <model>",
+      "/skills",
+      "/skills-import [<path>]",
+      "/skills-bundle-install [<path>]",
+    ])
 
     const output = stripAnsi(renderSlashCommandMenu("/st", 0).join("\n"))
 
@@ -164,6 +171,32 @@ describe("TUI render helpers", () => {
     })
 
     expect(output.split("\n").length).toBeLessThanOrEqual(height - 4)
+  })
+
+  it("keeps every screen row inside the requested width", () => {
+    const config = testConfig()
+    const longModelSession: Session = {
+      ...session("ses_width", "idle"),
+      model: {
+        provider: "openai",
+        model: "gpt-5.2-codex-super-long-model-name",
+      },
+    }
+
+    for (const width of [72, 80, 88, 96, 128]) {
+      const output = stripAnsi(renderScreen({
+        config,
+        session: longModelSession,
+        messages: [],
+        cwd: "C:\\Users\\user\\Documents\\a-very-long-workspace-directory\\agentsCli",
+        width,
+        height: 32,
+      }))
+
+      for (const line of output.split("\n")) {
+        expect(line.length).toBeLessThanOrEqual(width)
+      }
+    }
   })
 
   it("clips long notices without pushing the prompt area off-screen", () => {

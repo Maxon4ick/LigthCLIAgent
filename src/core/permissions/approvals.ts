@@ -134,10 +134,13 @@ export class ApprovalMediator implements PermissionPolicy {
 
   constructor(private readonly options: ApprovalMediatorOptions) {}
 
-  async decide(request: PermissionRequest): Promise<PermissionDecision> {
+  async decide(request: PermissionRequest, abortSignal?: AbortSignal): Promise<PermissionDecision> {
     const decision = await this.options.basePolicy.decide(request)
     if (decision !== "ask") {
       return decision
+    }
+    if (abortSignal?.aborted) {
+      return "deny"
     }
 
     return this.ask(request)

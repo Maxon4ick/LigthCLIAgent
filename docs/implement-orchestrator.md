@@ -1,14 +1,22 @@
-# Implement Orchestrator / Sub-Agent System
+# Orchestrator / Delegation P0 Contract
 
 ## Goal
 
-Add a multi-turn agentic loop and a `delegate_task` tool so that one session (the
+The runtime has a multi-turn agentic loop and a `delegate_task` tool so that one session (the
 orchestrator) can spawn child sessions (sub-agents), wait for their results, and
 continue reasoning based on what they return.  No new runtime dependencies.
 
+This document records the implemented P0 contract. Delegation has the dedicated
+`agent.delegate` permission (`"delegate"` in config rules); it is not shell
+execution and does not depend on `allowShell`. The scheduler enforces modes
+before execution: plan/explore cannot delegate, orchestrate may delegate but
+cannot directly edit, execute shell, or use network tools, and build follows
+ordinary permissions. Child sessions use a distinct `agentId` and the same
+permission policy, so they never gain shell/edit/network authority implicitly.
+
 ---
 
-## What exists today that we build on
+## Implemented primitives
 
 | Existing primitive | Where | Notes |
 |---|---|---|
@@ -25,14 +33,14 @@ continue reasoning based on what they return.  No new runtime dependencies.
 ### 1. Multi-turn loop in `SessionRunner`  
 **File:** `src/core/session/session-runner.ts`
 
-The current `run()` method does one LLM pass and returns.  Wrap the body in a
-`for` loop that continues while the LLM is producing tool calls.
+`run()` loops while the provider produces tool calls and is bounded by
+`config.agent.maxIterations`.
 
 ```
-MAX_ITERATIONS = 10   (make it a constant at the top of the file)
+maxIterations = config.agent.maxIterations
 
 run():
-  for iter 0..MAX_ITERATIONS:
+  for iter 0..maxIterations:
     stream LLM → collect assistantText + toolCalls
     save assistant message
     if toolCalls.length === 0: break          // final answer, done
@@ -42,7 +50,7 @@ run():
     if abortSignal.aborted: break
     // loop: tool results are now in the store, next iter re-reads them
   set session status idle / cancelled / error
-  return { sessionId, assistantText, toolResults, usage }
+  return { sessionId, assistantText, toolResults, usage, stopReason }
 ```
 
 Keep `assistantText` as the text from the **last** LLM turn (the final answer).
@@ -51,6 +59,10 @@ value.
 
 Usage accumulation: sum `inputTokens`/`outputTokens` across all iterations into a
 single `TokenUsage` object so callers see total cost.
+
+`stopReason` is `completed`, `cancelled`, `iteration_limit`, or `error`.
+Iteration limit is an error session/run outcome, not an ordinary idle
+completion. Tool results are persisted before the next provider call.
 
 ---
 
@@ -95,15 +107,12 @@ Where `ToolScheduler` is constructed inside `run()`, add:
 
 ```typescript
 runChildSession: async (sessionId, signal) => {
-  try {
-    const result = await this.run(sessionId, signal)
-    return { assistantText: result.assistantText, ok: true }
-  } catch (error) {
-    return {
-      assistantText: "",
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    }
+  const result = await this.run(sessionId, signal)
+  return {
+    assistantText: result.assistantText,
+    ok: result.stopReason === "completed",
+    error: result.error ??
+      (result.stopReason === "completed" ? undefined : result.stopReason),
   }
 },
 ```
@@ -134,12 +143,13 @@ export const delegateTaskTool: ToolDefinition<DelegateInput> = {
   description:
     "Spawn a focused sub-agent session to complete one task and return its final answer. " +
     "Use when a sub-problem is large, requires a different mode, or should run in isolation. " +
-    "The sub-agent has access to all the same tools as this session.",
-  kind: "execute",
+    "The sub-agent uses the same permission policy as this session.",
+  kind: "delegate",
   metadata: {
     safeConcurrent: false,
-    mutatesWorkspace: true,
-    requiresApproval: false,   // orchestrator already has permission; child inherits policy
+    mutatesWorkspace: false,
+    requiresApproval: false,
+    capabilities: ["agent.delegate"],
     tags: ["orchestration", "agent"],
   },
   inputSchema: {
@@ -161,7 +171,7 @@ export const delegateTaskTool: ToolDefinition<DelegateInput> = {
 
     const model = resolveChildModel(input, ctx.config)
     const childSession = ctx.sessionStore.createSession({
-      cwd:             input.cwd ?? ctx.cwd,
+      cwd:             resolveRealInsideCwd(ctx.cwd, input.cwd ?? "."),
       model,
       agentId:         createId("agent"),
       mode:            input.mode ?? "build",
@@ -223,7 +233,8 @@ In `materializeSystemContext`, add a branch for the new mode:
     "Orchestrate mode: your job is to decompose the user request into focused sub-tasks " +
     "and delegate each one to a sub-agent using the delegate_task tool. " +
     "Collect sub-agent results and synthesize a final answer. " +
-    "Do not write files or run shell commands directly — delegate those to sub-agents.",
+    "Only read/search/skill tools and delegate_task are available directly. " +
+    "Do not edit files or run shell/network tools directly.",
   )
 }
 ```
@@ -282,7 +293,7 @@ After implementing:
 3. **Integration smoke** — extend `test/smoke-cli.mjs` or add a new smoke script
    that runs:
    ```bash
-   node dist/src/cli/index.js run --mode orchestrate "delegate a task to summarize package.json"
+   node dist/cli/index.js run --mode orchestrate "delegate a task to summarize package.json"
    ```
    and asserts exit code 0.
 

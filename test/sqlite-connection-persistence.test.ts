@@ -11,7 +11,7 @@ describe("SQLite connection persistence", () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), "agent-cli-connect-"))
     const config = sqliteConfig()
 
-    const firstRuntime = createRuntime(config, cwd)
+    const firstRuntime = await sqliteRuntime(config, cwd)
     try {
       const db = requireDb(firstRuntime)
       db.setApiKey("anthropic", "test-anthropic-key")
@@ -23,10 +23,10 @@ describe("SQLite connection persistence", () => {
       db.upsertCustomModel(modelEntry("anthropic", "claude-test", "anthropic-messages"))
       db.setActiveModel({ provider: "anthropic", model: "claude-test" })
     } finally {
-      firstRuntime.db?.close()
+      await firstRuntime.dispose()
     }
 
-    const secondRuntime = createRuntime(config, cwd)
+    const secondRuntime = await sqliteRuntime(config, cwd)
     try {
       expect(secondRuntime.config.model).toEqual({ provider: "anthropic", model: "claude-test" })
       expect(secondRuntime.config.providers.anthropic).toMatchObject({
@@ -40,7 +40,7 @@ describe("SQLite connection persistence", () => {
       const session = createSession(secondRuntime)
       expect(session.model).toEqual({ provider: "anthropic", model: "claude-test" })
     } finally {
-      secondRuntime.db?.close()
+      await secondRuntime.dispose()
     }
   })
 
@@ -48,7 +48,7 @@ describe("SQLite connection persistence", () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), "agent-cli-openai-alias-"))
     const config = sqliteConfig()
 
-    const firstRuntime = createRuntime(config, cwd)
+    const firstRuntime = await sqliteRuntime(config, cwd)
     try {
       const db = requireDb(firstRuntime)
       db.setApiKey("openai", "test-openai-key")
@@ -60,10 +60,10 @@ describe("SQLite connection persistence", () => {
       db.upsertCustomModel(modelEntry("openai", "gpt-test", "openai-chat"))
       db.setActiveModel({ provider: "openai", model: "gpt-test" })
     } finally {
-      firstRuntime.db?.close()
+      await firstRuntime.dispose()
     }
 
-    const secondRuntime = createRuntime(config, cwd)
+    const secondRuntime = await sqliteRuntime(config, cwd)
     try {
       expect(secondRuntime.config.model).toEqual({ provider: "openai", model: "gpt-test" })
       expect(secondRuntime.config.providers.custom.openai).toMatchObject({
@@ -72,7 +72,7 @@ describe("SQLite connection persistence", () => {
         protocol: "openai-chat",
       })
     } finally {
-      secondRuntime.db?.close()
+      await secondRuntime.dispose()
     }
   })
 
@@ -80,7 +80,7 @@ describe("SQLite connection persistence", () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), "agent-cli-openai-custom-connections-"))
     const config = sqliteConfig()
 
-    const firstRuntime = createRuntime(config, cwd)
+    const firstRuntime = await sqliteRuntime(config, cwd)
     try {
       const db = requireDb(firstRuntime)
       db.setProviderConfig("openrouter", {
@@ -100,10 +100,10 @@ describe("SQLite connection persistence", () => {
       db.upsertCustomModel(modelEntry("local-llm", "local-model", "openai-compatible"))
       db.setActiveModel({ provider: "local-llm", model: "local-model" })
     } finally {
-      firstRuntime.db?.close()
+      await firstRuntime.dispose()
     }
 
-    const secondRuntime = createRuntime(config, cwd)
+    const secondRuntime = await sqliteRuntime(config, cwd)
     try {
       expect(secondRuntime.config.model).toEqual({ provider: "local-llm", model: "local-model" })
       expect(secondRuntime.config.providers.custom.openrouter).toMatchObject({
@@ -123,13 +123,13 @@ describe("SQLite connection persistence", () => {
         expect.objectContaining({ provider: "local-llm", model: "local-model" }),
       )
     } finally {
-      secondRuntime.db?.close()
+      await secondRuntime.dispose()
     }
   })
 
   it("stores OpenAI-compatible keys by exact provider name", async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), "agent-cli-openai-exact-keys-"))
-    const runtime = createRuntime(sqliteConfig(), cwd)
+    const runtime = await sqliteRuntime(sqliteConfig(), cwd)
     try {
       const db = requireDb(runtime)
       db.setApiKey("openai-compatible", "test-compatible-key")
@@ -139,7 +139,7 @@ describe("SQLite connection persistence", () => {
       expect(db.getApiKey("openai")).toBe("test-openai-key")
       expect(db.listApiKeys().map((entry) => entry.provider)).toEqual(["openai", "openai-compatible"])
     } finally {
-      runtime.db?.close()
+      await runtime.dispose()
     }
   })
 
@@ -147,7 +147,7 @@ describe("SQLite connection persistence", () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), "agent-cli-switch-active-model-"))
     const config = sqliteConfig()
 
-    const setupRuntime = createRuntime(config, cwd)
+    const setupRuntime = await sqliteRuntime(config, cwd)
     try {
       const db = requireDb(setupRuntime)
       db.setProviderConfig("minimax", {
@@ -158,23 +158,23 @@ describe("SQLite connection persistence", () => {
       db.setApiKey("minimax", "test-minimax-key")
       db.upsertCustomModel(modelEntry("minimax", "MiniMax-M2.1-highspeed", "openai-compatible"))
     } finally {
-      setupRuntime.db?.close()
+      await setupRuntime.dispose()
     }
 
-    const firstRuntime = createRuntime(config, cwd)
+    const firstRuntime = await sqliteRuntime(config, cwd)
     try {
       const session = createSession(firstRuntime)
       switchModel(firstRuntime, session.id, { provider: "minimax", model: "MiniMax-M2.1-highspeed" })
     } finally {
-      firstRuntime.db?.close()
+      await firstRuntime.dispose()
     }
 
-    const secondRuntime = createRuntime(config, cwd)
+    const secondRuntime = await sqliteRuntime(config, cwd)
     try {
       expect(secondRuntime.config.model).toEqual({ provider: "minimax", model: "MiniMax-M2.1-highspeed" })
       expect(createSession(secondRuntime).model).toEqual({ provider: "minimax", model: "MiniMax-M2.1-highspeed" })
     } finally {
-      secondRuntime.db?.close()
+      await secondRuntime.dispose()
     }
   })
 
@@ -182,7 +182,7 @@ describe("SQLite connection persistence", () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), "agent-cli-delete-active-model-"))
     const config = sqliteConfig()
 
-    const firstRuntime = createRuntime(config, cwd)
+    const firstRuntime = await sqliteRuntime(config, cwd)
     try {
       const db = requireDb(firstRuntime)
       db.setProviderConfig("local-test", {
@@ -196,17 +196,17 @@ describe("SQLite connection persistence", () => {
 
       db.deleteCustomModel("local-test", "model-to-delete")
     } finally {
-      firstRuntime.db?.close()
+      await firstRuntime.dispose()
     }
 
-    const secondRuntime = createRuntime(config, cwd)
+    const secondRuntime = await sqliteRuntime(config, cwd)
     try {
       expect(secondRuntime.config.model).toEqual(defaultConfig.model)
       expect(listModelCatalog(secondRuntime.config)).not.toContainEqual(
         expect.objectContaining({ provider: "local-test", model: "model-to-delete" }),
       )
     } finally {
-      secondRuntime.db?.close()
+      await secondRuntime.dispose()
     }
   })
 })
@@ -218,6 +218,10 @@ function sqliteConfig(): AppConfig {
       dbPath: ".agent-cli/test-agent.db",
     },
   })
+}
+
+async function sqliteRuntime(config: AppConfig, cwd: string): Promise<Runtime> {
+  return createRuntime({ config, cwd })
 }
 
 function modelEntry(provider: string, model: string, protocol: ModelCatalogEntry["protocol"]): ModelCatalogEntry {

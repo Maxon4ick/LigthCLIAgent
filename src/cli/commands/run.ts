@@ -3,6 +3,7 @@ import type { AgentMode, AppConfig, PartialDeep } from "../../core/config/schema
 import { normalizePromptFileMentions } from "../../core/context/file-mentions.js"
 import { addUserPrompt, createRuntime, createSession } from "../../core/runtime.js"
 import type { ToolExecution } from "../../core/tools/scheduler.js"
+import { createLocalToolProvider } from "../../adapters/local/local-tool-provider.js"
 
 interface RunArgs {
   json: boolean
@@ -22,6 +23,7 @@ interface RunArgs {
   mode?: AgentMode
   cwd?: string
   prompt: string
+  localExtensions: string[]
 }
 
 export async function runCommand(args: string[]): Promise<void> {
@@ -31,7 +33,14 @@ export async function runCommand(args: string[]): Promise<void> {
     cwd,
     overrides: createRunOverrides(parsed),
   })
-  const runtime = createRuntime(config, cwd)
+  const localProviders = await Promise.all(parsed.localExtensions.map((manifestPath) =>
+    createLocalToolProvider({ manifestPath, trusted: true }),
+  ))
+  const runtime = await createRuntime({
+    config,
+    cwd,
+    toolProviders: localProviders,
+  })
   const session = parsed.sessionId
     ? runtime.sessions.getSession(parsed.sessionId)
     : createSession(runtime, parsed.mode ? { mode: parsed.mode } : undefined)
@@ -40,21 +49,28 @@ export async function runCommand(args: string[]): Promise<void> {
 
   const run = runtime.runs.start(session.id)
   const result = await run.promise
+  const sessionSnapshot = runtime.sessions.getSession(session.id)
+  await runtime.dispose()
 
   if (parsed.json) {
     process.stdout.write(
       `${JSON.stringify(
         {
-          session: runtime.sessions.getSession(session.id),
+          session: sessionSnapshot,
           runId: run.runId,
           fileMentions: normalizedPrompt.mentions,
           assistantText: result.assistantText,
           toolResults: result.toolResults,
+          usage: result.usage,
+          stopReason: result.stopReason,
+          stop: result.stop,
+          error: result.error,
         },
         null,
         2,
       )}\n`,
     )
+    if (result.stopReason !== "completed") process.exitCode = 1
     return
   }
 
@@ -64,6 +80,10 @@ export async function runCommand(args: string[]): Promise<void> {
 
   if (result.toolResults.length > 0) {
     process.stdout.write(formatToolResults(result.toolResults))
+  }
+  if (result.stopReason !== "completed") {
+    process.stderr.write(`Run stopped: ${result.stopReason}${result.error ? ` (${result.error})` : ""}\n`)
+    process.exitCode = 1
   }
 }
 
@@ -85,6 +105,7 @@ function parseRunArgs(args: string[]): RunArgs {
   let mode: AgentMode | undefined
   let cwd: string | undefined
   const promptParts: string[] = []
+  const localExtensions: string[] = []
   let parseOptions = true
 
   for (let index = 0; index < args.length; index += 1) {
@@ -219,6 +240,14 @@ function parseRunArgs(args: string[]): RunArgs {
       continue
     }
 
+    if (parseOptions && arg === "--allow-local-extension") {
+      const value = args[index + 1]
+      if (!value) throw new Error("--allow-local-extension requires a manifest path")
+      localExtensions.push(value)
+      index += 1
+      continue
+    }
+
     if (parseOptions && arg.startsWith("-")) {
       throw new Error(`Unknown run argument: ${arg}`)
     }
@@ -249,6 +278,7 @@ function parseRunArgs(args: string[]): RunArgs {
     mode,
     cwd,
     prompt,
+    localExtensions,
   }
 }
 

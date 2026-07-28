@@ -1,7 +1,6 @@
 import { loadConfig } from "../../core/config/config-loader.js"
 import type { AppConfig, PartialDeep } from "../../core/config/schema.js"
 import { createRuntime } from "../../core/runtime.js"
-import { startHttpServer } from "../../server/http-server.js"
 
 interface ServeArgs {
   host?: string
@@ -28,7 +27,8 @@ export async function serveCommand(args: string[]): Promise<void> {
     cwd,
     overrides,
   })
-  const runtime = createRuntime(config, cwd)
+  const runtime = await createRuntime({ config, cwd })
+  const { startHttpServer } = await import("../../adapters/http/index.js")
   const server = await startHttpServer(runtime)
 
   process.stdout.write(`agent-cli daemon listening on ${server.url}\n`)

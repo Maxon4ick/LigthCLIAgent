@@ -1,8 +1,7 @@
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
-import path from "node:path"
 import { BadRequestError, NotFoundError } from "../../shared/errors.js"
 import { createId } from "../../shared/ids.js"
 import { redactMessageParts } from "../security/redaction.js"
+import { readJsonFile, resolveWorkspacePath, updateJsonFile } from "../storage/atomic-json-file.js"
 import type { Message, Session } from "./message-types.js"
 import type {
   AddMessageInput,
@@ -186,25 +185,11 @@ export class FileSessionStore implements SessionStore {
   }
 
   private writeLocked<T>(mutate: (data: SessionStoreFile) => T): T {
-    mkdirSync(path.dirname(this.filePath), { recursive: true })
-    const box: { value?: T } = {}
-    let mutated = false
-
-    withFileLock(`${this.filePath}.lock`, () => {
-      const latest = loadStoreFile(this.filePath)
-      box.value = mutate(latest)
-      mutated = true
-      const tmpPath = `${this.filePath}.${process.pid}.tmp`
-      writeFileSync(tmpPath, `${JSON.stringify(latest, null, 2)}\n`, "utf8")
-      renameSync(tmpPath, this.filePath)
+    return updateJsonFile(this.filePath, emptyStore, parseStoreFile, (latest) => {
+      const result = mutate(latest)
       this.data = latest
+      return result
     })
-
-    if (!mutated) {
-      throw new Error("Session store mutation did not run")
-    }
-
-    return box.value as T
   }
 }
 
@@ -218,20 +203,15 @@ function findSession(data: SessionStoreFile, sessionId: string): Session {
 }
 
 export function resolveStorePath(cwd: string, configuredPath: string): string {
-  return path.isAbsolute(configuredPath) ? configuredPath : path.resolve(cwd, configuredPath)
+  return resolveWorkspacePath(cwd, configuredPath, "Session storage path")
 }
 
 function loadStoreFile(filePath: string): SessionStoreFile {
-  try {
-    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown
-    return parseStoreFile(parsed)
-  } catch (error) {
-    if (isMissingFileError(error)) {
-      return { version: 2, sessions: [], messages: [] }
-    }
+  return readJsonFile(filePath, emptyStore, parseStoreFile)
+}
 
-    throw error
-  }
+function emptyStore(): SessionStoreFile {
+  return { version: 2, sessions: [], messages: [] }
 }
 
 function parseStoreFile(value: unknown): SessionStoreFile {
@@ -260,57 +240,4 @@ function normalizeSession(session: Session): Session {
     ...session,
     mode: session.mode ?? "build",
   }
-}
-
-function isMissingFileError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: string }).code === "ENOENT"
-  )
-}
-
-function withFileLock(lockPath: string, fn: () => void): void {
-  const deadline = Date.now() + 5_000
-  let handle: number | undefined
-
-  while (handle === undefined) {
-    try {
-      handle = openSync(lockPath, "wx")
-      writeFileSync(handle, `${process.pid}\n`, "utf8")
-    } catch (error) {
-      if (!isFileExistsError(error) || Date.now() > deadline) {
-        throw error
-      }
-      sleepSync(25)
-    }
-  }
-
-  try {
-    fn()
-  } finally {
-    closeSync(handle)
-    try {
-      unlinkSync(lockPath)
-    } catch (error) {
-      if (!isMissingFileError(error)) {
-        throw error
-      }
-    }
-  }
-}
-
-function sleepSync(ms: number): void {
-  const buffer = new SharedArrayBuffer(4)
-  Atomics.wait(new Int32Array(buffer), 0, 0, ms)
-}
-
-function isFileExistsError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: string }).code === "EEXIST"
-  )
 }

@@ -3,28 +3,100 @@
   "version": "0.1.0",
   "description": "Production-oriented scaffold for a local agent CLI and daemon runtime.",
   "type": "module",
+  "license": "UNLICENSED",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./tools": {
+      "types": "./dist/tools.d.ts",
+      "import": "./dist/tools.js"
+    },
+    "./skills": {
+      "types": "./dist/skills.d.ts",
+      "import": "./dist/skills.js"
+    },
+    "./hooks": {
+      "types": "./dist/hooks.d.ts",
+      "import": "./dist/hooks.js"
+    },
+    "./http": {
+      "types": "./dist/adapters/http/index.d.ts",
+      "import": "./dist/adapters/http/index.js"
+    },
+    "./tui": {
+      "types": "./dist/adapters/tui/index.d.ts",
+      "import": "./dist/adapters/tui/index.js"
+    },
+    "./sqlite": {
+      "types": "./dist/adapters/sqlite/index.d.ts",
+      "import": "./dist/adapters/sqlite/index.js"
+    },
+    "./adapters/local": {
+      "types": "./dist/adapters/local/index.d.ts",
+      "import": "./dist/adapters/local/index.js"
+    },
+    "./adapters/mcp": {
+      "types": "./dist/adapters/mcp/index.d.ts",
+      "import": "./dist/adapters/mcp/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "bin": {
-    "agent-cli": "dist/src/cli/index.js"
+    "agent-cli": "dist/cli/index.js"
   },
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
     "dev": "tsx src/cli/index.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.test.json",
     "test": "vitest run",
     "smoke": "node test/smoke-cli.mjs",
-    "preflight": "npm run build && npm run typecheck && npm test && npm run smoke"
+    "pack:check": "npm run verify:pack",
+    "verify:pack": "node scripts/verify-pack.mjs",
+    "smoke:tarball": "node scripts/smoke-tarball.mjs",
+    "scan:secrets": "node scripts/scan-secrets.mjs",
+    "preflight": "npm run build && npm run typecheck && npm test && npm run smoke && npm run verify:pack",
+    "release:check": "npm run preflight && npm run smoke:tarball && npm run scan:secrets && npm audit --omit=dev",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run release:check"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.15.29",
+    "better-sqlite3": "^12.11.1",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
     "vitest": "^3.2.2"
   },
   "dependencies": {
+    "ajv": "^8.20.0"
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^12.11.1"
-  }
+  },
+  "peerDependenciesMeta": {
+    "@modelcontextprotocol/sdk": {
+      "optional": true
+    },
+    "better-sqlite3": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "coding-agent",
+    "cli",
+    "local-agent",
+    "typescript"
+  ]
 }

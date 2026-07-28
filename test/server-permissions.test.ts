@@ -4,7 +4,7 @@ import path from "node:path"
 import { describe, expect, it } from "vitest"
 import { defaultConfig, mergeConfig } from "../src/core/config/schema.js"
 import { createRuntime } from "../src/core/runtime.js"
-import { startHttpServer } from "../src/server/http-server.js"
+import { startHttpServer } from "../src/adapters/http/server.js"
 
 describe("HTTP daemon permission approvals", () => {
   it("lists and resolves pending permission requests", async () => {

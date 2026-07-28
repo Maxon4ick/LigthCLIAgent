@@ -1,13 +1,28 @@
-node_modules/
-dist/
+# Dependencies, build output, and test artefacts.
+/node_modules/
+/dist/
+/coverage/
+/.nyc_output/
+*.tsbuildinfo
+*.tgz
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment files and local runtime state.
 .env
 .env.*
-*.log
-coverage/
-.agent-cli/
-.claude/
+!.env.example
+/.agent-cli/
+/.claude/
+/.agents/
+/.cache/
+/tmp/
+/temp/
 
-# Local runtime state, caches, and credential material.
+# Local databases, credentials, and machine-specific settings.
 *.db
 *.db-*
 *.sqlite
@@ -18,18 +33,28 @@ id_rsa*
 id_ed25519*
 *.local.json
 
+# Editor and operating-system files.
+/.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
 # Upstream/reference checkouts. Remove these rules only if you intentionally
 # want to publish them as submodules or vendored source.
 /opencode/
 /qwen-code/
+/ascend310p-operator-porting/
 
-# Local prompt drafts written as markdown.
+# Local agent-generated scratch files.
+/matmul.py
+
+# Local prompt drafts and reports.
 /*PROMPT*.md
 /*prompt*.md
 /prompts/*.md
 /prompts/**/*.md
 /.prompts/*.md
 /.prompts/**/*.md
-
 *REPORT*.md
 *PROMPT*.md

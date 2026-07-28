@@ -1,21 +1,15 @@
 import { loadConfig } from "../../core/config/config-loader.js"
 import type { AppConfig } from "../../core/config/schema.js"
-import { SqliteDatabase, resolveDbPath } from "../../core/storage/sqlite-db.js"
+import { openRuntimeState } from "../../core/storage/open-runtime-state.js"
 
 export async function configCommand(_args: string[]): Promise<void> {
   const loadedConfig = await loadConfig({ cwd: process.cwd() })
-  const config = applyStoredConfig(loadedConfig, process.cwd())
-  process.stdout.write(`${JSON.stringify(redactConfig(config), null, 2)}\n`)
-}
-
-function applyStoredConfig(config: AppConfig, cwd: string): AppConfig {
-  if (config.storage.kind !== "sqlite") return config
-
-  const db = new SqliteDatabase(resolveDbPath(cwd, config.storage.dbPath))
+  const opened = await openRuntimeState(loadedConfig, process.cwd())
   try {
-    return db.applyOverrides(config)
+    const config = opened.state.applyOverrides(loadedConfig)
+    process.stdout.write(`${JSON.stringify(redactConfig(config), null, 2)}\n`)
   } finally {
-    db.close()
+    await opened.dispose()
   }
 }
 

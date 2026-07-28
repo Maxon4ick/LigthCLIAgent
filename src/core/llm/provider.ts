@@ -5,6 +5,7 @@ import type { PublicToolDefinition } from "../tools/tool.js"
 export interface ProviderAdapter {
   id: string
   stream(input: ProviderRequest): AsyncIterable<LLMEvent>
+  dispose?(): Promise<void> | void
 }
 
 export interface ProviderRequest {

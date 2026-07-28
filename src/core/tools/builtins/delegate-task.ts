@@ -1,5 +1,6 @@
 import { createId } from "../../../shared/ids.js"
 import type { AppConfig } from "../../config/schema.js"
+import { resolveRealInsideCwd } from "./path-utils.js"
 import type { ToolDefinition } from "../tool.js"
 
 interface DelegateInput {
@@ -15,12 +16,13 @@ export const delegateTaskTool: ToolDefinition<DelegateInput> = {
   description:
     "Spawn a focused sub-agent session to complete one task and return its final answer. " +
     "Use when a sub-problem is large, requires a different mode, or should run in isolation. " +
-    "The sub-agent has access to all the same tools as this session.",
-  kind: "execute",
+    "The sub-agent uses the same permission policy as this session; its mode may further restrict tools.",
+  kind: "delegate",
   metadata: {
     safeConcurrent: false,
-    mutatesWorkspace: true,
+    mutatesWorkspace: false,
     requiresApproval: false,
+    capabilities: ["agent.delegate"],
     tags: ["orchestration", "agent"],
   },
   inputSchema: {
@@ -43,14 +45,25 @@ export const delegateTaskTool: ToolDefinition<DelegateInput> = {
     if (!ctx.runChildSession) {
       return { ok: false, error: "delegate_task: runChildSession not available in this context" }
     }
+    if ((ctx.delegationDepth ?? 0) >= ctx.config.agent.maxDelegationDepth) {
+      return {
+        ok: false,
+        error: `delegate_task: maximum delegation depth ${ctx.config.agent.maxDelegationDepth} reached`,
+      }
+    }
 
-    const model = resolveChildModel(input, ctx.config)
+    const parent = ctx.sessionStore.getSession(ctx.sessionId)
+    const model = resolveChildModel(input, parent.model, ctx.config)
+    const cwd = input.cwd ? await resolveRealInsideCwd(ctx.cwd, input.cwd) : ctx.cwd
     const childSession = ctx.sessionStore.createSession({
-      cwd: input.cwd ?? ctx.cwd,
+      cwd,
       model,
       agentId: createId("agent"),
       mode: input.mode ?? "build",
       parentSessionId: ctx.sessionId,
+    })
+    ctx.sessionStore.updateSession(childSession.id, {
+      metadata: { delegationDepth: (ctx.delegationDepth ?? 0) + 1 },
     })
 
     ctx.sessionStore.addMessage({
@@ -69,11 +82,18 @@ export const delegateTaskTool: ToolDefinition<DelegateInput> = {
   },
 }
 
-function resolveChildModel(input: DelegateInput, config: AppConfig): AppConfig["model"] {
-  if (input.provider && input.model) {
-    return { provider: input.provider, model: input.model }
+function resolveChildModel(
+  input: DelegateInput,
+  parentModel: AppConfig["model"],
+  config: AppConfig,
+): AppConfig["model"] {
+  if (input.provider || input.model) {
+    return {
+      provider: input.provider ?? parentModel.provider,
+      model: input.model ?? parentModel.model,
+    }
   }
   const small = config.models.small
   if (small && small.provider !== "mock") return small
-  return config.model
+  return parentModel
 }

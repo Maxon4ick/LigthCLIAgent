@@ -3,7 +3,13 @@ import path from "node:path"
 import { redactSecrets } from "../security/redaction.js"
 import type { Session } from "../session/message-types.js"
 import type { AppConfig } from "../config/schema.js"
-import { loadWorkspaceSkills, type SkillInfo } from "./skills.js"
+import {
+  loadSkillIndex,
+  workspaceSkillSources,
+  type SkillDiagnostic,
+  type SkillInfo,
+  type SkillSource,
+} from "./skills.js"
 
 // ---------------------------------------------------------------------------
 // Per-mode agent system prompts — mirrors opencode's plugin/agent.ts constants
@@ -17,8 +23,8 @@ const SYSTEM_BUILD =
 
 const SYSTEM_PLAN =
   "You are an AI coding agent in planning mode. Analyse the codebase, think through the " +
-  "required changes, and write a clear plan. " +
-  "Planning mode is read-only: do not edit files or run mutating shell commands."
+  "required changes, and write a clear plan. Planning mode permits read/search/skill tools " +
+  "and safe plan/session operations only; edit, shell, network, and delegation tools are blocked."
 
 const SYSTEM_EXPLORE =
   "You are a file search specialist. You excel at thoroughly navigating and exploring codebases.\n\n" +
@@ -31,14 +37,16 @@ const SYSTEM_EXPLORE =
   "- Use grep for searching file contents with regex\n" +
   "- Use read_file when you know the specific file path\n" +
   "- Return file paths as absolute paths in your final response\n" +
-  "- Do not create any files or run commands that modify the workspace\n\n" +
+  "- Only read/search and skill tools are available\n" +
+  "- Do not edit files, run shell/network tools, delegate work, or change session state\n\n" +
   "Complete the user's search request efficiently and report your findings clearly."
 
 const SYSTEM_ORCHESTRATE =
   "You are an AI orchestration agent. Decompose the user request into focused sub-tasks and " +
-  "delegate each one to a sub-agent using the delegate_task tool. " +
-  "Collect sub-agent results and synthesise a final answer. " +
-  "Do not write files or run shell commands directly — delegate those to sub-agents."
+  "delegate each one to a sub-agent using the delegate_task tool. Collect sub-agent results " +
+  "and synthesise a final answer. Only read/search/skill tools and delegate_task are available " +
+  "directly. Do not write files, run shell or network tools, or mutate the workspace directly; " +
+  "delegate implementation to a build child."
 
 function agentSystemPrompt(mode: Session["mode"]): string {
   switch (mode) {
@@ -63,15 +71,20 @@ export interface SystemContext {
   generatedAt: string
   instructionFiles: string[]
   skills: SkillInfo[]
+  skillDiagnostics?: SkillDiagnostic[]
 }
 
-export async function materializeSystemContext(session: Session, config: AppConfig): Promise<SystemContext> {
+export async function materializeSystemContext(
+  session: Session,
+  config: AppConfig,
+  skillSources: readonly SkillSource[] = workspaceSkillSources(config.agent.skillPaths),
+): Promise<SystemContext> {
   const generatedAt = new Date().toISOString()
 
-  const [instructionFiles, isGitRepo, skills] = await Promise.all([
+  const [instructionFiles, isGitRepo, skillIndex] = await Promise.all([
     collectInstructionFiles(session.cwd),
     detectGitRepo(session.cwd),
-    loadWorkspaceSkills(session.cwd, config.agent.skillPaths),
+    loadSkillIndex(session.cwd, skillSources),
   ])
 
   const parts: string[] = []
@@ -108,8 +121,8 @@ export async function materializeSystemContext(session: Session, config: AppConf
   }
 
   // 6. Skill guidance — mirrors opencode's skill/guidance.ts XML format
-  if (skills.length > 0) {
-    parts.push(renderSkillGuidance(skills))
+  if (skillIndex.skills.length > 0) {
+    parts.push(renderSkillGuidance(skillIndex.skills, config.agent.skillPromptMaxChars))
   }
 
   return {
@@ -117,7 +130,8 @@ export async function materializeSystemContext(session: Session, config: AppConf
     cwd: session.cwd,
     generatedAt,
     instructionFiles: instructionFiles.map((f) => f.relativePath),
-    skills,
+    skills: skillIndex.skills,
+    skillDiagnostics: skillIndex.diagnostics,
   }
 }
 
@@ -141,23 +155,78 @@ function renderEnvBlock(cwd: string, isGitRepo: boolean, date: string): string {
 // Skill guidance — XML format ready for future custom skill bundles
 // ---------------------------------------------------------------------------
 
-function renderSkillGuidance(skills: SkillInfo[]): string {
-  const lines = [
+export function renderSkillGuidance(skills: readonly SkillInfo[], maxChars: number): string {
+  const records = skills.map((skill) => ({
+    compact: renderCompactSkill(skill),
+    full: renderFullSkill(skill),
+    fullSelected: false,
+  }))
+
+  // Names are more useful than a few long descriptions. Start with every name,
+  // remove whole records only when even that does not fit, then spend the
+  // remaining budget on complete description/path records in index order.
+  let shown = records.length
+  while (shown > 0 && renderCatalog(records.slice(0, shown), records.length).length > maxChars) {
+    shown -= 1
+  }
+
+  const selected = records.slice(0, shown)
+  for (const record of selected) {
+    record.fullSelected = true
+    if (renderCatalog(selected, records.length).length > maxChars) {
+      record.fullSelected = false
+    }
+  }
+
+  const rendered = renderCatalog(selected, records.length)
+  if (rendered.length <= maxChars) return rendered
+
+  // A very small positive budget may be smaller than the mandatory disclosure.
+  // Never hide truncation merely to satisfy such a budget.
+  return renderCatalog([], records.length)
+}
+
+function renderCatalog(
+  records: Array<{ compact: string; full: string; fullSelected: boolean }>,
+  total: number,
+): string {
+  const full = records.filter((record) => record.fullSelected).length
+  const shortened = records.length - full
+  const omitted = total - records.length
+  return [
     "Skills provide specialised instructions and workflows for specific tasks.",
-    "Use the use_skill tool to load a skill when a task matches its description.",
-    "<available_skills>",
-    ...skills.flatMap((skill) => [
-      "  <skill>",
-      `    <name>${skill.name}</name>`,
-      ...(skill.description
-        ? [`    <description>${redactSecrets(skill.description)}</description>`]
-        : []),
-      `    <path>${skill.path}</path>`,
-      "  </skill>",
-    ]),
+    "Use use_skill to load instructions. Use list_skills for the complete index.",
+    `<available_skills total="${total}" full="${full}" shortened="${shortened}" omitted="${omitted}">`,
+    ...records.map((record) => record.fullSelected ? record.full : record.compact),
     "</available_skills>",
-  ]
-  return lines.join("\n")
+    `Skill catalog: total ${total}; shown fully ${full}; shortened ${shortened}; not shown ${omitted}. ` +
+      "The full list is available through list_skills.",
+  ].join("\n")
+}
+
+function renderCompactSkill(skill: SkillInfo): string {
+  return `  <skill><name>${escapeXml(skill.name)}</name></skill>`
+}
+
+function renderFullSkill(skill: SkillInfo): string {
+  return [
+    "  <skill>",
+    `    <name>${escapeXml(skill.name)}</name>`,
+    ...(skill.description
+      ? [`    <description>${escapeXml(redactSecrets(skill.description))}</description>`]
+      : []),
+    `    <path>${escapeXml(skill.path)}</path>`,
+    "  </skill>",
+  ].join("\n")
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;")
 }
 
 // ---------------------------------------------------------------------------

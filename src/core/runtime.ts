@@ -1,17 +1,31 @@
 import type { AppConfig, ModelRef } from "./config/schema.js"
-import { EventBus } from "./events/event-bus.js"
+import { EventBus, type EventListener, type SubscribeOptions } from "./events/event-bus.js"
 import { createProviderAdapter, listModelCatalog, resolveModel } from "./llm/model-registry.js"
 import { ApprovalMediator, FileRememberedApprovalRuleStore, resolveApprovalRulesPath } from "./permissions/approvals.js"
-import { RulesetPermissionPolicy } from "./permissions/policy.js"
+import { RulesetPermissionPolicy, type PermissionPolicy } from "./permissions/policy.js"
 import { FileSessionStore, resolveStorePath } from "./session/file-session-store.js"
-import { SqliteSessionStore } from "./session/sqlite-session-store.js"
 import { InMemorySessionStore, type SessionStore } from "./session/session-store.js"
 import type { Message, Session } from "./session/message-types.js"
-import { SessionRunner, type SessionRunResult } from "./session/session-runner.js"
-import { SqliteDatabase, resolveDbPath } from "./storage/sqlite-db.js"
+import { SessionRunner, type SessionRunResult, type Tokenizer } from "./session/session-runner.js"
+import type { RuntimeStateStore, StorageAdapter } from "./storage/contracts.js"
+import { FileRuntimeStateStore } from "./storage/file-runtime-state.js"
+import { createAdapterStores, resolveStorageAdapter } from "./storage/registry.js"
+import { MemoryRuntimeStateStore } from "./storage/runtime-state.js"
 import { FileToolOutputStore, resolveToolOutputPath } from "./tools/output-store.js"
-import { createDefaultToolRegistry, type ToolRegistry } from "./tools/registry.js"
+import { builtinToolProvider, loadToolProviders, ToolRegistry } from "./tools/registry.js"
 import { createId } from "../shared/ids.js"
+import type { ProviderAdapter } from "./llm/provider.js"
+import type { ToolProvider } from "./tools/tool.js"
+import { workspaceSkillSources, type SkillSource } from "./context/skills.js"
+import {
+  HookPipeline,
+  type AgentHook,
+  type HookProvider,
+} from "./hooks/hooks.js"
+import {
+  DefaultContextBudgetManager,
+  type ContextBudgetManager,
+} from "./context/context-budget.js"
 
 export interface Runtime {
   config: AppConfig
@@ -22,19 +36,169 @@ export interface Runtime {
   tools: ToolRegistry
   runner: SessionRunner
   runs: ActiveRunManager
-  db?: SqliteDatabase
+  /** @deprecated Use state. Present only for explicitly selected SQLite storage. */
+  db?: LegacyRuntimeDatabase
+  state: RuntimeStateStore
   models: {
     current: ReturnType<typeof resolveModel>
     catalog: ReturnType<typeof listModelCatalog>
   }
+  ready: Promise<void>
+  startSession(sessionId: string): ActiveRun
+  stopSession(sessionId: string, reason?: string): boolean
+  subscribe(listener: EventListener, options?: SubscribeOptions): () => void
+  providerFor(model: ModelRef): ProviderAdapter
+  dispose(): Promise<void>
 }
 
-export function createRuntime(config: AppConfig, cwd: string): Runtime {
-  const events = new EventBus()
-  const db = config.storage.kind === "sqlite" ? new SqliteDatabase(resolveDbPath(cwd, config.storage.dbPath)) : undefined
-  if (db) config = db.applyOverrides(config)
-  const sessions = createSessionStore(config, cwd, db)
-  const toolRegistry = createDefaultToolRegistry(config)
+export interface LegacyRuntimeDatabase {
+  getApiKey(provider: string): string | undefined
+  setApiKey(provider: string, apiKey: string): void
+  deleteApiKey(provider: string): void
+  listApiKeys(): Array<{ provider: string; updatedAt: string }>
+  upsertCustomModel(entry: AppConfig["models"]["catalog"][number]): void
+  deleteCustomModel(provider: string, model: string): void
+  setProviderConfig(
+    provider: string,
+    config: {
+      baseUrl: string
+      protocol: AppConfig["models"]["catalog"][number]["protocol"]
+      apiKeyEnv: string
+    },
+  ): void
+  setActiveModel(ref: ModelRef): void
+  close(): void
+}
+
+export type ProviderFactory = (model: ModelRef) => ProviderAdapter
+
+export interface CreateRuntimeOptions {
+  config: AppConfig
+  cwd: string
+  provider?: ProviderAdapter
+  providerFactory?: ProviderFactory
+  sessionStore?: SessionStore
+  permissionPolicy?: PermissionPolicy
+  eventBus?: EventBus
+  toolProviders?: ToolProvider[]
+  skillSources?: SkillSource[]
+  hooks?: AgentHook[] | HookProvider[]
+  contextBudget?: ContextBudgetManager
+  tokenizer?: Tokenizer
+  storageAdapters?: StorageAdapter[]
+  runtimeState?: RuntimeStateStore
+}
+
+/** @deprecated Prefer the object-form CreateRuntimeOptions. */
+export type RuntimeOptions = Omit<CreateRuntimeOptions, "config">
+
+export function createRuntime(options: CreateRuntimeOptions): Promise<Runtime>
+export function createRuntime(config: AppConfig, cwd: string): Runtime
+export function createRuntime(config: AppConfig, options: RuntimeOptions): Runtime
+export function createRuntime(
+  configOrOptions: AppConfig | CreateRuntimeOptions,
+  cwdOrOptions?: string | RuntimeOptions,
+): Runtime | Promise<Runtime> {
+  if (isCreateRuntimeOptions(configOrOptions, cwdOrOptions)) {
+    return createRuntimeAsync(configOrOptions)
+  }
+  const options: RuntimeOptions = typeof cwdOrOptions === "string"
+    ? { cwd: cwdOrOptions }
+    : cwdOrOptions as RuntimeOptions
+  return constructRuntime(configOrOptions as AppConfig, options, options.hooks as AgentHook[] | undefined, false)
+}
+
+async function createRuntimeAsync(options: CreateRuntimeOptions): Promise<Runtime> {
+  const lifecycleController = new AbortController()
+  const resolved = await resolveHooks(options.hooks ?? [])
+  let adapter: StorageAdapter | undefined
+  let runtime: Runtime | undefined
+  try {
+    let sessions = options.sessionStore
+    let state = options.runtimeState
+    let config = options.config
+    if (!sessions) {
+      adapter = await resolveStorageAdapter(config, options.storageAdapters ?? [])
+      const stores = await createAdapterStores(adapter, {
+        cwd: options.cwd,
+        config,
+        signal: lifecycleController.signal,
+      })
+      sessions = stores.sessions
+      state ??= stores.state
+    }
+    state ??= new MemoryRuntimeStateStore()
+    config = state.applyOverrides(config)
+    const { config: _originalConfig, ...runtimeOptions } = options
+    runtime = constructRuntime(
+      config,
+      { ...runtimeOptions, sessionStore: sessions, runtimeState: state },
+      resolved.hooks,
+      true,
+      resolved.providers,
+      lifecycleController,
+      adapter,
+    )
+    await runtime.ready
+    return runtime
+  } catch (error) {
+    if (runtime) {
+      try {
+        await runtime.dispose()
+      } catch {
+        // Preserve the initialization error.
+      }
+      throw error
+    }
+    lifecycleController.abort(error)
+    try {
+      await adapter?.dispose?.()
+    } catch {
+      // Preserve the initialization error.
+    }
+    for (const provider of [...resolved.providers].reverse()) {
+      try {
+        await provider.dispose?.()
+      } catch {
+        // Preserve the initialization error.
+      }
+    }
+    throw error
+  }
+}
+
+function constructRuntime(
+  config: AppConfig,
+  options: RuntimeOptions,
+  resolvedHooks: AgentHook[] = [],
+  canonical = false,
+  hookProviders: HookProvider[] = [],
+  lifecycleController = new AbortController(),
+  storageAdapter?: StorageAdapter,
+): Runtime {
+  const cwd = options.cwd
+  const events = options.eventBus ?? new EventBus()
+  const initializedToolProviders: ToolProvider[] = []
+  let disposed = false
+  const state = options.runtimeState ?? (
+    config.storage.kind === "file"
+      ? new FileRuntimeStateStore(cwd)
+      : new MemoryRuntimeStateStore()
+  )
+  config = state.applyOverrides(config)
+  if (!options.sessionStore && config.storage.kind === "sqlite") {
+    throw new Error(
+      "SQLite storage requires asynchronous initialization. Use await createRuntime({ config, cwd }).",
+    )
+  }
+  const sessions = options.sessionStore ?? (
+    config.storage.kind === "memory"
+      ? new InMemorySessionStore()
+      : new FileSessionStore(resolveStorePath(cwd, config.storage.path))
+  )
+  const db = storageAdapter?.legacyDatabase as LegacyRuntimeDatabase | undefined
+  const skillSources = options.skillSources ?? workspaceSkillSources(config.agent.skillPaths)
+  const hooks = new HookPipeline(resolvedHooks, events, config.extensions.hookTimeoutMs)
   const rememberedApprovals = new FileRememberedApprovalRuleStore(resolveApprovalRulesPath(cwd, config.permissions.approvalsPath))
   const permissionPolicy = new RulesetPermissionPolicy({
     allowShell: config.permissions.allowShell,
@@ -47,29 +211,103 @@ export function createRuntime(config: AppConfig, cwd: string): Runtime {
     rememberedRules: rememberedApprovals,
   })
   const approvals = new ApprovalMediator({
-    basePolicy: permissionPolicy,
+    basePolicy: options.permissionPolicy ?? permissionPolicy,
     eventBus: events,
     timeoutMs: config.permissions.approvalTimeoutMs,
     rememberedApprovals,
   })
+  const toolRegistry = new ToolRegistry()
+  const ready = loadToolProviders(
+    toolRegistry,
+    [builtinToolProvider, ...(options.toolProviders ?? [])],
+    {
+      cwd,
+      config,
+      events,
+      permissions: approvals,
+      abortSignal: lifecycleController.signal,
+    },
+    config.tools.disabledProviders,
+    config.tools.disabled,
+    initializedToolProviders,
+  ).then(() => undefined)
   const outputStore = new FileToolOutputStore(
     resolveToolOutputPath(cwd, config.toolOutput.path),
     cwd,
     config.toolOutput.retentionDays,
     config.toolOutput.maxStoredBytes,
   )
+  const providerFor = options.providerFactory ??
+    (options.provider ? () => options.provider as ProviderAdapter : (model: ModelRef) => createProviderAdapter({ ...config, model }))
 
   const runner = new SessionRunner({
     store: sessions,
     eventBus: events,
-    provider: createProviderAdapter(config),
-    providerFactory: (model) => createProviderAdapter({ ...config, model }),
+    provider: options.provider ?? createProviderAdapter(config),
+    providerFactory: providerFor,
     toolRegistry,
     permissionPolicy: approvals,
     config,
     outputStore,
+    initialize: ready,
+    skillSources,
+    hooks,
+    tokenizer: options.tokenizer,
+    contextBudget: options.contextBudget ??
+      (canonical ? new DefaultContextBudgetManager(undefined, undefined, events) : undefined),
   })
-  const runs = new ActiveRunManager(runner, events, approvals)
+  const runs = new ActiveRunManager(runner, events, approvals, sessions)
+  const provider = options.provider
+  const dispose = async (): Promise<void> => {
+    if (disposed) return
+    disposed = true
+    lifecycleController.abort(new Error("Runtime disposed"))
+    try {
+      await ready
+    } catch {
+      // Initialization errors are reported to the createRuntime caller.
+    }
+    const errors: unknown[] = []
+    for (const item of [...initializedToolProviders].reverse()) {
+      try {
+        await item.dispose?.()
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+    for (const source of [...skillSources].reverse()) {
+      try {
+        await source.dispose?.()
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+    try {
+      await hooks.dispose()
+    } catch (error) {
+      errors.push(error)
+    }
+    for (const hookProvider of [...hookProviders].reverse()) {
+      try {
+        await hookProvider.dispose?.()
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+    try {
+      await provider?.dispose?.()
+    } catch (error) {
+      errors.push(error)
+    }
+    try {
+      await storageAdapter?.dispose?.()
+    } catch (error) {
+      errors.push(error)
+    }
+    if (errors.length > 0) {
+      throw new AggregateError(errors, "One or more runtime resources failed to dispose")
+    }
+  }
 
   return {
     config,
@@ -81,11 +319,52 @@ export function createRuntime(config: AppConfig, cwd: string): Runtime {
     runner,
     runs,
     db,
+    state,
     models: {
       current: resolveModel(config),
       catalog: listModelCatalog(config),
     },
+    ready,
+    startSession: (sessionId) => runs.start(sessionId),
+    stopSession: (sessionId, reason) => Boolean(runs.abort(sessionId, undefined, reason)),
+    subscribe: (listener, subscribeOptions) => events.subscribe(listener, subscribeOptions),
+    providerFor,
+    dispose,
   }
+}
+
+function isCreateRuntimeOptions(
+  value: AppConfig | CreateRuntimeOptions,
+  second: string | RuntimeOptions | undefined,
+): value is CreateRuntimeOptions {
+  return second === undefined && typeof value === "object" && value !== null && "config" in value && "cwd" in value
+}
+
+async function resolveHooks(
+  items: AgentHook[] | HookProvider[],
+): Promise<{ hooks: AgentHook[]; providers: HookProvider[] }> {
+  const hooks: AgentHook[] = []
+  const providers: HookProvider[] = []
+  try {
+    for (const item of items) {
+      if ("load" in item && typeof item.load === "function") {
+        providers.push(item)
+        hooks.push(...await item.load())
+      } else {
+        hooks.push(item as AgentHook)
+      }
+    }
+  } catch (error) {
+    for (const provider of providers.reverse()) {
+      try {
+        await provider.dispose?.()
+      } catch {
+        // Preserve the initialization error.
+      }
+    }
+    throw error
+  }
+  return { hooks, providers }
 }
 
 export interface ActiveRun {
@@ -102,6 +381,7 @@ export class ActiveRunManager {
     private readonly runner: SessionRunner,
     private readonly events: EventBus,
     private readonly approvals: ApprovalMediator,
+    private readonly sessions: SessionStore,
   ) {}
 
   start(sessionId: string): ActiveRun {
@@ -124,13 +404,16 @@ export class ActiveRunManager {
     this.runs.set(sessionId, active)
 
     void promise
-      .then(() => {
+      .then((result) => {
         this.events.publish({
           type: "session.run.finished",
           payload: {
             sessionId,
             runId,
-            status: controller.signal.aborted ? "cancelled" : "completed",
+            status: result.stop.reason === "cancelled"
+              ? "cancelled"
+              : result.stop.reason === "completed" ? "completed" : "error",
+            stopReason: result.stop.reason,
             durationMs: Date.now() - startedAtMs,
           },
         })
@@ -142,6 +425,7 @@ export class ActiveRunManager {
             sessionId,
             runId,
             status: controller.signal.aborted ? "cancelled" : "error",
+            stopReason: controller.signal.aborted ? "cancelled" : "error",
             durationMs: Date.now() - startedAtMs,
           },
         })
@@ -167,7 +451,11 @@ export class ActiveRunManager {
 
     if (!active.controller.signal.aborted) {
       active.controller.abort(new Error(reason))
-      this.approvals.denyPendingForSession(sessionId)
+      for (const pendingSessionId of new Set(this.approvals.listPending().map((approval) => approval.request.sessionId))) {
+        if (isSessionOrDescendant(this.sessions, pendingSessionId, sessionId)) {
+          this.approvals.denyPendingForSession(pendingSessionId)
+        }
+      }
       this.events.publish({
         type: "session.run.aborted",
         payload: { sessionId, runId: active.runId, reason },
@@ -183,16 +471,17 @@ export class ActiveRunManager {
   }
 }
 
-function createSessionStore(config: AppConfig, cwd: string, db?: SqliteDatabase): SessionStore {
-  if (config.storage.kind === "memory") {
-    return new InMemorySessionStore()
+function isSessionOrDescendant(store: SessionStore, candidateId: string, ancestorId: string): boolean {
+  if (candidateId === ancestorId) return true
+  const sessions = new Map(store.listSessions().map((session) => [session.id, session]))
+  const visited = new Set<string>()
+  let current = sessions.get(candidateId)
+  while (current?.parentSessionId && !visited.has(current.parentSessionId)) {
+    if (current.parentSessionId === ancestorId) return true
+    visited.add(current.parentSessionId)
+    current = sessions.get(current.parentSessionId)
   }
-
-  if (config.storage.kind === "sqlite" && db) {
-    return new SqliteSessionStore(db.db)
-  }
-
-  return new FileSessionStore(resolveStorePath(cwd, config.storage.path))
+  return false
 }
 
 export function createSession(
@@ -306,11 +595,11 @@ export function switchModel(
   }
 
   runtime.config.model = ref
-  const provider = createProviderAdapter(runtime.config)
+  const provider = runtime.providerFor(ref)
   runtime.runner.setProvider(provider)
 
   const session = runtime.sessions.updateSession(sessionId, { model: ref })
-  runtime.db?.setActiveModel(ref)
+  runtime.state.setActiveModel(ref)
   runtime.models.current = resolveModel(runtime.config)
   runtime.models.catalog = listModelCatalog(runtime.config)
 

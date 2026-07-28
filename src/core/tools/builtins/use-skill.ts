@@ -1,10 +1,14 @@
-import { readFile } from "node:fs/promises"
-import { loadWorkspaceSkills } from "../../context/skills.js"
-import { resolveInsideCwd } from "./path-utils.js"
+import {
+  loadIndexedSkill,
+  loadSkillIndex,
+  resolveSkill,
+  workspaceSkillSources,
+} from "../../context/skills.js"
 import type { ToolDefinition } from "../tool.js"
 
 interface UseSkillInput {
   name: string
+  resource?: string
 }
 
 interface UseSkillOutput {
@@ -12,6 +16,7 @@ interface UseSkillOutput {
   path: string
   description?: string
   body: string
+  resource?: string
 }
 
 export const useSkillTool: ToolDefinition<unknown, UseSkillOutput> = {
@@ -29,28 +34,39 @@ export const useSkillTool: ToolDefinition<unknown, UseSkillOutput> = {
     required: ["name"],
     properties: {
       name: { type: "string" },
+      resource: {
+        type: "string",
+        description: "Optional resource path relative to the selected skill directory.",
+      },
     },
   },
   async execute(input, context) {
     const parsed = parseInput(input)
-    const skills = await loadWorkspaceSkills(context.cwd, context.config.agent.skillPaths)
-    const requested = parsed.name.toLowerCase()
-    const skill = skills.find((item) => item.name.toLowerCase() === requested || item.path.toLowerCase() === requested)
-    if (!skill) {
-      return {
-        ok: false,
-        error: `Skill not found: ${parsed.name}`,
-      }
+    const index = await loadSkillIndex(
+      context.cwd,
+      context.skillSources ?? workspaceSkillSources(context.config.agent.skillPaths),
+    )
+    let skill
+    try {
+      skill = resolveSkill(index, parsed.name)
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
-
-    const filePath = resolveInsideCwd(context.cwd, skill.path)
+    const loaded = await loadIndexedSkill(index, skill, {
+      cwd: context.cwd,
+      config: context.config,
+      events: context.eventBus,
+      abortSignal: context.abortSignal,
+      resource: parsed.resource,
+    })
     return {
       ok: true,
       output: {
         name: skill.name,
         path: skill.path,
         description: skill.description,
-        body: await readFile(filePath, "utf8"),
+        body: loaded.body,
+        resource: parsed.resource,
       },
     }
   },
@@ -66,5 +82,9 @@ function parseInput(input: unknown): UseSkillInput {
     throw new Error("use_skill.name must be a non-empty string")
   }
 
-  return { name: name.trim() }
+  const resource = (input as { resource?: unknown }).resource
+  if (resource !== undefined && (typeof resource !== "string" || resource.trim().length === 0)) {
+    throw new Error("use_skill.resource must be a non-empty string")
+  }
+  return { name: name.trim(), resource: typeof resource === "string" ? resource.trim() : undefined }
 }

@@ -1,9 +1,12 @@
-import type { AppConfig, ModelCatalogEntry, ModelRef } from "../../core/config/schema.js"
-import type { PendingApproval } from "../../core/permissions/approvals.js"
-import type { PublicFileSnapshotRecord, RevertSnapshotResult } from "../../core/session/file-snapshots.js"
-import type { Message, Session } from "../../core/session/message-types.js"
-import type { ToolExecution } from "../../core/tools/scheduler.js"
-import type { PublicToolDefinition } from "../../core/tools/tool.js"
+import type { AppConfig, ModelCatalogEntry, ModelRef } from "../../../core/config/schema.js"
+import type { PendingApproval } from "../../../core/permissions/approvals.js"
+import type { PublicFileSnapshotRecord, RevertSnapshotResult } from "../../../core/session/file-snapshots.js"
+import type { Message, Session } from "../../../core/session/message-types.js"
+import type { ToolExecution } from "../../../core/tools/scheduler.js"
+import type { PublicToolDefinition } from "../../../core/tools/tool.js"
+import type { SkillInfo } from "../../../core/context/skills.js"
+import type { SkillImportCandidate, SkillImportResult } from "../../../core/context/skills-import.js"
+import type { BundleContents, BundleInstallResult } from "../../../core/context/bundle-install.js"
 
 export type TuiCommand =
   | { type: "exit" }
@@ -32,6 +35,9 @@ export type TuiCommand =
   | { type: "key_delete" }
   | { type: "model_remove" }
   | { type: "copy" }
+  | { type: "skills" }
+  | { type: "skills_import"; bundlePath?: string }
+  | { type: "bundle_install"; bundlePath?: string }
   | { type: "prompt"; prompt: string }
   | { type: "empty" }
   | { type: "unknown"; input: string }
@@ -62,10 +68,10 @@ export const slashCommandHints: SlashCommandHint[] = [
   { command: "/diff", description: "Show edit snapshots", insert: "/diff" },
   { command: "/revert", description: "Revert current session edits", insert: "/revert" },
   { command: "/abort", description: "Cancel active run", insert: "/abort" },
-  { command: "/mode build", description: "Switch to build mode", insert: "/mode build" },
-  { command: "/mode plan", description: "Switch to planning mode", insert: "/mode plan" },
-  { command: "/mode explore", description: "Switch to explore mode", insert: "/mode explore" },
-  { command: "/mode orchestrate", description: "Switch to orchestrate mode", insert: "/mode orchestrate" },
+  { command: "/mode build", description: "Build mode: normal permission policy", insert: "/mode build" },
+  { command: "/mode plan", description: "Plan mode: read/search + safe planning state", insert: "/mode plan" },
+  { command: "/mode explore", description: "Explore mode: read/search only", insert: "/mode explore" },
+  { command: "/mode orchestrate", description: "Orchestrate: read/search + delegation only", insert: "/mode orchestrate" },
   { command: "/compact", description: "Summarize and trim old transcript", insert: "/compact" },
   { command: "/fork", description: "Fork current session", insert: "/fork" },
   { command: "/keys", description: "List stored API keys", insert: "/keys" },
@@ -73,6 +79,9 @@ export const slashCommandHints: SlashCommandHint[] = [
   { command: "/key-delete", description: "Delete a stored API key", insert: "/key-delete" },
   { command: "/model-remove", description: "Remove a custom model from the catalog", insert: "/model-remove" },
   { command: "/copy", description: "Enter copy/yank mode", insert: "/copy" },
+  { command: "/skills", description: "List workspace skills", insert: "/skills" },
+  { command: "/skills-import [<path>]", description: "Import a skill bundle into configured skill paths", insert: "/skills-import " },
+  { command: "/skills-bundle-install [<path>]", description: "Import skills and copy inactive bundle resources", insert: "/skills-bundle-install " },
   { command: "/exit", description: "Quit", insert: "/exit", aliases: ["/quit", "/q"] },
 ]
 
@@ -152,6 +161,9 @@ export function parseTuiCommand(input: string): TuiCommand {
   }
   if (command === "use" && rest[0]) return { type: "use", sessionId: rest[0] }
   if (command === "copy" || command === "yank") return { type: "copy" }
+  if (command === "skills") return { type: "skills" }
+  if (command === "skills-import" || command === "import-skills") return { type: "skills_import", bundlePath: rest[0] }
+  if (command === "skills-bundle-install" || command === "bundle-install") return { type: "bundle_install", bundlePath: rest[0] }
   return { type: "unknown", input: trimmed }
 }
 
@@ -220,7 +232,7 @@ export function renderHelp(width = 88): string {
     ["/diff", "Show edit snapshots for current session"],
     ["/revert", "Revert edit snapshots for current session"],
     ["/abort", "Cancel active run"],
-    ["/mode <build|plan|explore|orchestrate>", "Switch agent mode"],
+    ["/mode <build|plan|explore|orchestrate>", "Switch enforced tool-capability ceiling"],
     ["/compact", "Summarize and trim old transcript"],
     ["/fork", "Fork current session"],
     ["/keys", "List stored API keys"],
@@ -228,6 +240,9 @@ export function renderHelp(width = 88): string {
     ["/key-delete", "Delete a stored API key"],
     ["/model-remove", "Remove a custom model from the catalog"],
     ["/copy", "Enter copy/yank mode — navigate lines, select range, copy to clipboard"],
+    ["/skills", "List workspace skills loaded from configured skill paths"],
+    ["/skills-import", "Import all skills from a bundle directory into skill paths"],
+    ["/skills-bundle-install", "Import skills; copy hooks/tools as inactive P0 resources"],
     ["/exit", "Quit"],
   ]
 
@@ -348,7 +363,7 @@ export function renderWelcome(config: AppConfig, session: Session, cwd: string, 
 }
 
 export function renderScreen(snapshot: TuiScreenSnapshot): string {
-  const width = snapshot.width ?? 96
+  const width = Math.max(24, Math.floor(snapshot.width ?? 96))
   const height = snapshot.height ?? 32
   const notice = noticeLinesForScreen(snapshot.notice, width, height)
   const { transcriptHeight, sidebar, sidebarWidth, gutter, contentWidth } = screenLayout(width, height, notice.length)
@@ -376,7 +391,10 @@ export function renderScreen(snapshot: TuiScreenSnapshot): string {
     ...notice,
     "",
     renderFooter(snapshot, width),
-  ].join("\n")
+  ]
+    .flatMap((line) => line.split("\n"))
+    .map((line) => truncateAnsi(line, width))
+    .join("\n")
 }
 
 export function getTranscriptScrollMax(messages: Message[], width = 96, height = 32, notice?: string): number {
@@ -586,6 +604,182 @@ export function extractCopyLines(messages: Message[], width: number): CopyModeLi
   return renderTranscript(messages, Math.max(24, width - 4))
     .split("\n")
     .map((line) => ({ plain: stripAnsi(line), styled: line }))
+}
+
+export function renderSkillsPanel(skills: SkillInfo[], width = 100): string {
+  if (skills.length === 0) {
+    return renderPanel(
+      "Skills",
+      [
+        "No skills found in configured skill paths.",
+        "",
+        `${ansi.dim}Add skills with /skills-import or place SKILL.md files in .agents/skills/.${ansi.reset}`,
+      ],
+      width,
+    )
+  }
+
+  const lines = skills.map((skill) => {
+    const name = color(skill.name.padEnd(36), palette.primary)
+    const desc = skill.description ? truncatePlain(skill.description, Math.max(20, width - 42)) : ansi.dim + "(no description)" + ansi.reset
+    return `  ${name} ${desc}`
+  })
+
+  return renderPanel(
+    `Skills (${skills.length})`,
+    [
+      ...lines,
+      "",
+      `${ansi.dim}Use /skills-import to bulk-import a bundle. Skills load automatically on next session.${ansi.reset}`,
+    ],
+    width,
+  )
+}
+
+export function renderSkillsImportPreviewPanel(
+  candidates: SkillImportCandidate[],
+  bundlePath: string,
+  targetPath: string,
+  width = 100,
+): string {
+  if (candidates.length === 0) {
+    return renderPanel(
+      "Import Skills Bundle",
+      [
+        bundlePath
+          ? `${color("bundle", palette.muted)}  ${bundlePath}`
+          : `${ansi.dim}Enter a bundle path at the prompt below.${ansi.reset}`,
+        "",
+        `${ansi.dim}No skills found yet. Enter a valid bundle path to preview.${ansi.reset}`,
+      ],
+      width,
+    )
+  }
+
+  const newSkills = candidates.filter((c) => !c.exists)
+  const existingSkills = candidates.filter((c) => c.exists)
+
+  const foundSummary = `${candidates.length} skill${candidates.length === 1 ? "" : "s"} (${newSkills.length} new, ${existingSkills.length} already present)`
+  const lines: string[] = [
+    `${color("Bundle:", palette.muted)}  ${bundlePath}`,
+    `${color("Target:", palette.muted)}  ${targetPath}`,
+    `${color("Found:", palette.muted)}   ${foundSummary}`,
+    "",
+  ]
+
+  const maxPreview = Math.max(0, width - 8)
+  for (const c of candidates) {
+    const marker = c.exists ? color("-", palette.muted) : color("+", palette.success)
+    const desc = c.description ? ` ${ansi.dim}${truncatePlain(c.description, Math.max(10, maxPreview - c.name.length - 4))}${ansi.reset}` : ""
+    lines.push(`  ${marker} ${c.name}${desc}`)
+  }
+
+  return renderPanel(`Import Skills Bundle — ${candidates.length} found`, lines, width)
+}
+
+export function renderSkillsImportResultPanel(results: SkillImportResult[], width = 100): string {
+  const imported = results.filter((r) => r.status === "imported")
+  const skipped = results.filter((r) => r.status === "skipped")
+  const errors = results.filter((r) => r.status === "error")
+
+  const summary = [
+    imported.length > 0 ? `${color(String(imported.length), palette.success)} imported` : "",
+    skipped.length > 0 ? `${color(String(skipped.length), palette.muted)} skipped` : "",
+    errors.length > 0 ? `${color(String(errors.length), palette.error)} error${errors.length === 1 ? "" : "s"}` : "",
+  ].filter(Boolean).join("  ")
+
+  const lines: string[] = ["", summary, ""]
+
+  for (const r of results) {
+    const icon =
+      r.status === "imported" ? color("*", palette.success)
+      : r.status === "error" ? color("x", palette.error)
+      : color("-", palette.muted)
+    const note = r.status === "error" ? `  ${ansi.dim}${truncatePlain(r.error ?? "", Math.max(10, width - r.name.length - 12))}${ansi.reset}` : ""
+    lines.push(`  ${icon} ${r.name}${note}`)
+  }
+
+  if (imported.length > 0) {
+    lines.push("", `${ansi.dim}Skills are auto-discovered on the next agent session.${ansi.reset}`)
+  }
+
+  return renderPanel(`Import Complete`, lines, width)
+}
+
+export function renderBundleInstallPreviewPanel(
+  contents: BundleContents | undefined,
+  targetPath: string,
+  width = 100,
+): string {
+  if (!contents) {
+    return renderPanel(
+      "Install Bundle",
+      [`${ansi.dim}Enter a bundle path at the prompt below.${ansi.reset}`],
+      width,
+    )
+  }
+
+  const newSkills = contents.skillCandidates.filter((c) => !c.exists)
+  const existingSkills = contents.skillCandidates.filter((c) => c.exists)
+  const maxPreview = Math.max(0, width - 8)
+
+  const lines: string[] = [
+    `${color("Bundle:", palette.muted)}  ${contents.bundleRootRel}`,
+    `${color("Target:", palette.muted)}  ${targetPath}`,
+    `${color("Install:", palette.muted)} ${contents.installRootRel}`,
+    `${color("Skills:", palette.muted)}  ${contents.skillCandidates.length} found (${newSkills.length} new, ${existingSkills.length} already present)`,
+    `${color("Hooks:", palette.muted)}   ${contents.hooksDetected} detected (inactive)`,
+    `${color("Tools:", palette.muted)}   ${contents.executableToolsDetected} detected (inactive)`,
+    `${color("Parts:", palette.muted)}   ${contents.componentTargets.map((c) => c.name).join(", ") || "none"}`,
+    "",
+  ]
+
+  for (const c of contents.skillCandidates) {
+    const marker = c.exists ? color("-", palette.muted) : color("+", palette.success)
+    const desc = c.description
+      ? ` ${ansi.dim}${truncatePlain(c.description, Math.max(10, maxPreview - c.name.length - 4))}${ansi.reset}`
+      : ""
+    lines.push(`  ${marker} ${c.name}${desc}`)
+  }
+
+  if (contents.hookScripts.length > 0) {
+    lines.push("")
+    for (const h of contents.hookScripts) {
+      const eventLabel = h.matcher ? `${h.event}(${h.matcher})` : h.event
+      lines.push(`  ${color("~", palette.info ?? palette.muted)} ${h.name}  ${ansi.dim}→ ${eventLabel}${ansi.reset}`)
+    }
+    lines.push(`  ${ansi.dim}(copied as inert resources; hooks are not activated in P0)${ansi.reset}`)
+  }
+
+  return renderPanel(`Install Bundle — ${contents.name}`, lines, width)
+}
+
+export function renderBundleInstallResultPanel(result: BundleInstallResult, width = 100): string {
+  const parts = [
+    result.skillsImported > 0 ? `${color(String(result.skillsImported), palette.success)} skills imported` : "",
+    result.skillsSkipped > 0 ? `${color(String(result.skillsSkipped), palette.muted)} skipped` : "",
+    result.skillsErrors > 0 ? `${color(String(result.skillsErrors), palette.error)} errors` : "",
+    result.hooksDetected > 0 ? `${color(String(result.hooksDetected), palette.muted)} hooks detected (inactive)` : "",
+    result.executableToolsDetected > 0
+      ? `${color(String(result.executableToolsDetected), palette.muted)} tools detected (inactive)`
+      : "",
+    result.componentsCopied.length > 0 ? `${color(result.componentsCopied.join(","), palette.info)} copied` : "",
+  ].filter(Boolean).join("  ")
+
+  const lines: string[] = ["", parts, ""]
+
+  if (result.componentErrors.length > 0) {
+    lines.push(`${color("Component errors:", palette.error)}  ${result.componentErrors.join("; ")}`)
+  }
+
+  lines.push(`${color("Bundle root:", palette.muted)}  ${result.bundleRootPath}`)
+  if (result.bundleRecordPath) {
+    lines.push("", `${ansi.dim}Bundle registered at ${result.bundleRecordPath}${ansi.reset}`)
+  }
+  lines.push(`${ansi.dim}Hooks and executable tools are not activated in P0; Claude settings are unchanged.${ansi.reset}`)
+  lines.push(`${ansi.dim}Skills auto-discovered on next agent session.${ansi.reset}`)
+
+  return renderPanel("Bundle Install Complete", lines, width)
 }
 
 export function renderCopyModeScreen(
@@ -799,10 +993,16 @@ function center(text: string, width: number): string {
 }
 
 function fitColumns(left: string, right: string, width: number): string {
-  const gap = Math.max(1, width - visibleLength(left) - visibleLength(right))
+  const safeWidth = Math.max(1, Math.floor(width))
+  const gap = safeWidth - visibleLength(left) - visibleLength(right)
   if (gap > 1) return `${left}${" ".repeat(gap)}${right}`
-  const available = Math.max(8, width - visibleLength(right) - 2)
-  return `${truncateAnsi(left, available)}  ${right}`
+
+  const separator = safeWidth >= 10 ? "  " : " "
+  const minimumLeftWidth = Math.min(8, Math.max(0, safeWidth - separator.length))
+  const rightWidth = Math.max(0, safeWidth - minimumLeftWidth - separator.length)
+  const fittedRight = truncateAnsi(right, rightWidth)
+  const leftWidth = Math.max(0, safeWidth - visibleLength(fittedRight) - separator.length)
+  return `${truncateAnsi(left, leftWidth)}${separator}${fittedRight}`
 }
 
 function joinColumns(
@@ -988,13 +1188,17 @@ function wrapAnsiLine(line: string, width: number): string[] {
 }
 
 function truncateAnsi(text: string, width: number): string {
-  if (visibleLength(text) <= width) return text
-  return `${stripAnsi(text).slice(0, Math.max(0, width - 3))}...`
+  const safeWidth = Math.max(0, Math.floor(width))
+  if (visibleLength(text) <= safeWidth) return text
+  if (safeWidth <= 3) return stripAnsi(text).slice(0, safeWidth)
+  return `${stripAnsi(text).slice(0, safeWidth - 3)}...`
 }
 
 function truncatePlain(text: string, width: number): string {
-  if (text.length <= width) return text
-  return `${text.slice(0, Math.max(0, width - 3))}...`
+  const safeWidth = Math.max(0, Math.floor(width))
+  if (text.length <= safeWidth) return text
+  if (safeWidth <= 3) return text.slice(0, safeWidth)
+  return `${text.slice(0, safeWidth - 3)}...`
 }
 
 function trimMiddle(text: string, width: number): string {

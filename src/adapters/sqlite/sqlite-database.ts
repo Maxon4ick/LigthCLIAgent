@@ -1,14 +1,15 @@
-import BetterSqlite3 from "better-sqlite3"
+import { createRequire } from "node:module"
 import { mkdirSync } from "node:fs"
 import path from "node:path"
-import type { AppConfig, ModelCapabilities, ModelCatalogEntry, ModelCost, ModelRef, ProviderProtocol } from "../config/schema.js"
+import type { AppConfig, ModelCapabilities, ModelCatalogEntry, ModelCost, ModelRef, ProviderProtocol } from "../../core/config/schema.js"
 
 export class SqliteDatabase {
-  readonly db: BetterSqlite3.Database
+  readonly db: SqliteDatabaseHandle
 
   constructor(dbPath: string) {
+    const BetterSqlite = loadBetterSqlite()
     mkdirSync(path.dirname(dbPath), { recursive: true })
-    this.db = new BetterSqlite3(dbPath)
+    this.db = new BetterSqlite(dbPath)
     this.db.pragma("journal_mode = WAL")
     this.db.pragma("foreign_keys = ON")
     this.migrate()
@@ -186,6 +187,10 @@ export class SqliteDatabase {
       .run(key, value, new Date().toISOString())
   }
 
+  deleteSetting(key: string): void {
+    this.db.prepare("DELETE FROM settings WHERE key = ?").run(key)
+  }
+
   getActiveModel(): ModelRef | undefined {
     const provider = this.getSetting("active_model_provider")
     const model = this.getSetting("active_model_model")
@@ -274,13 +279,13 @@ export class SqliteDatabase {
 
     // Apply API keys for all providers
     for (const [provider, apiKey] of allKeys) {
-      if (provider === "anthropic") {
+      if (provider === "anthropic" && !providers.anthropic.apiKey) {
         providers.anthropic = { ...providers.anthropic, apiKey }
-      } else if (provider === "openai-compatible") {
+      } else if (provider === "openai-compatible" && !providers.openaiCompatible.apiKey) {
         providers.openaiCompatible = { ...providers.openaiCompatible, apiKey }
-      } else if (provider === "gemini") {
+      } else if (provider === "gemini" && !providers.gemini.apiKey) {
         providers.gemini = { ...providers.gemini, apiKey }
-      } else if (providers.custom[provider]) {
+      } else if (providers.custom[provider] && !providers.custom[provider].apiKey) {
         providers.custom[provider] = { ...providers.custom[provider], apiKey }
       }
       // Custom provider without a saved config is skipped — key alone isn't enough to connect
@@ -309,6 +314,44 @@ export class SqliteDatabase {
   close(): void {
     this.db.close()
   }
+}
+
+function loadBetterSqlite(): SqliteConstructor {
+  try {
+    return createRequire(import.meta.url)("better-sqlite3") as SqliteConstructor
+  } catch (error) {
+    throw new Error(
+      `SQLite storage is optional and requires "better-sqlite3".
+Install it with:
+  npm install better-sqlite3
+Or use:
+  --storage file`,
+      { cause: error },
+    )
+  }
+}
+
+export interface SqliteRunResult {
+  changes: number
+  lastInsertRowid: number | bigint
+}
+
+export interface SqliteStatement {
+  run(...params: unknown[]): SqliteRunResult
+  get(...params: unknown[]): unknown
+  all(...params: unknown[]): unknown[]
+}
+
+export interface SqliteDatabaseHandle {
+  pragma(source: string): unknown
+  exec(source: string): this
+  prepare(source: string): SqliteStatement
+  transaction<T>(operation: () => T): () => T
+  close(): void
+}
+
+interface SqliteConstructor {
+  new (filename: string): SqliteDatabaseHandle
 }
 
 export function resolveDbPath(cwd: string, configuredPath: string): string {

@@ -97,11 +97,35 @@ export interface AppConfig {
   }
   tools: {
     disabled: string[]
+    disabledProviders: string[]
+  }
+  extensions: {
+    trustedLocalManifests: string[]
+    mcpServers: Array<{
+      id: string
+      transport: "stdio"
+      command: string
+      args: string[]
+      envFrom: Record<string, string>
+      cwd?: string
+      startupTimeoutMs: number
+      toolTimeoutMs: number
+      enabled: boolean
+    }>
+    hookTimeoutMs: number
   }
   agent: {
     defaultMode: AgentMode
     compactMaxMessages: number
+    maxIterations: number
+    maxDelegationDepth: number
+    skillPromptMaxChars: number
     skillPaths: string[]
+    contextBudget: {
+      enabled: boolean
+      reserveOutputTokens: number
+      compactionThreshold: number
+    }
   }
   audit: {
     path: string
@@ -193,7 +217,7 @@ export const defaultConfig: AppConfig = {
     small: { provider: "mock", model: "mock-agent" },
   },
   server: { host: "127.0.0.1", port: 4170 },
-  storage: { kind: "sqlite", path: ".agent-cli/sessions.json", dbPath: ".agent-cli/agent.db" },
+  storage: { kind: "file", path: ".agent-cli/sessions.json", dbPath: ".agent-cli/agent.db" },
   permissions: {
     allowShell: false,
     allowEdit: false,
@@ -207,11 +231,25 @@ export const defaultConfig: AppConfig = {
   },
   tools: {
     disabled: [],
+    disabledProviders: [],
+  },
+  extensions: {
+    trustedLocalManifests: [],
+    mcpServers: [],
+    hookTimeoutMs: 5_000,
   },
   agent: {
     defaultMode: "build",
     compactMaxMessages: 20,
+    maxIterations: 10,
+    maxDelegationDepth: 3,
+    skillPromptMaxChars: 16_000,
     skillPaths: [".agents/skills", ".qwen/skills", ".codex/skills"],
+    contextBudget: {
+      enabled: true,
+      reserveOutputTokens: 4_096,
+      compactionThreshold: 0.85,
+    },
   },
   audit: { path: ".agent-cli/audit.log" },
   toolOutput: {
@@ -237,7 +275,9 @@ export function validateConfig(value: unknown): AppConfig {
   const storage = readRecord(value.storage, "storage")
   const permissions = readRecord(value.permissions, "permissions")
   const tools = readRecord(value.tools, "tools")
+  const extensions = readRecord(value.extensions, "extensions")
   const agent = readRecord(value.agent, "agent")
+  const contextBudget = readRecord(agent.contextBudget, "agent.contextBudget")
   const audit = readRecord(value.audit, "audit")
   const toolOutput = readRecord(value.toolOutput, "toolOutput")
 
@@ -292,11 +332,34 @@ export function validateConfig(value: unknown): AppConfig {
     },
     tools: {
       disabled: readStringArray(tools.disabled, "tools.disabled"),
+      disabledProviders: readStringArray(tools.disabledProviders, "tools.disabledProviders"),
+    },
+    extensions: {
+      trustedLocalManifests: readStringArray(
+        extensions.trustedLocalManifests,
+        "extensions.trustedLocalManifests",
+      ),
+      mcpServers: readMcpServers(extensions.mcpServers, "extensions.mcpServers"),
+      hookTimeoutMs: readPositiveInteger(extensions.hookTimeoutMs, "extensions.hookTimeoutMs"),
     },
     agent: {
       defaultMode: readAgentMode(agent.defaultMode, "agent.defaultMode"),
       compactMaxMessages: readPositiveInteger(agent.compactMaxMessages, "agent.compactMaxMessages"),
+      maxIterations: readPositiveInteger(agent.maxIterations, "agent.maxIterations"),
+      maxDelegationDepth: readPositiveInteger(agent.maxDelegationDepth, "agent.maxDelegationDepth"),
+      skillPromptMaxChars: readPositiveInteger(agent.skillPromptMaxChars, "agent.skillPromptMaxChars"),
       skillPaths: readStringArray(agent.skillPaths, "agent.skillPaths"),
+      contextBudget: {
+        enabled: readBoolean(contextBudget.enabled, "agent.contextBudget.enabled"),
+        reserveOutputTokens: readPositiveInteger(
+          contextBudget.reserveOutputTokens,
+          "agent.contextBudget.reserveOutputTokens",
+        ),
+        compactionThreshold: readRatio(
+          contextBudget.compactionThreshold,
+          "agent.contextBudget.compactionThreshold",
+        ),
+      },
     },
     audit: {
       path: readString(audit.path, "audit.path"),
@@ -340,7 +403,19 @@ export function mergeConfig(base: AppConfig, patch: PartialDeep<AppConfig>): App
     storage: { ...base.storage, ...(patch.storage as Partial<AppConfig["storage"]> | undefined) },
     permissions: { ...base.permissions, ...patch.permissions },
     tools: { ...base.tools, ...patch.tools },
-    agent: { ...base.agent, ...patch.agent },
+    extensions: {
+      ...base.extensions,
+      ...patch.extensions,
+      mcpServers: patch.extensions?.mcpServers ?? base.extensions.mcpServers,
+    },
+    agent: {
+      ...base.agent,
+      ...patch.agent,
+      contextBudget: {
+        ...base.agent.contextBudget,
+        ...patch.agent?.contextBudget,
+      },
+    },
     audit: { ...base.audit, ...patch.audit },
     toolOutput: { ...base.toolOutput, ...patch.toolOutput },
   })
@@ -438,6 +513,40 @@ function readStringArray(value: unknown, name: string): string[] {
   }
 
   return value.map((item, index) => readString(item, `${name}[${index}]`))
+}
+
+function readRatio(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 1) {
+    throw new Error(`${name} must be a number greater than 0 and at most 1`)
+  }
+  return value
+}
+
+function readMcpServers(value: unknown, name: string): AppConfig["extensions"]["mcpServers"] {
+  if (!Array.isArray(value)) throw new Error(`${name} must be an array`)
+  return value.map((item, index) => {
+    const at = `${name}[${index}]`
+    const record = readRecord(item, at)
+    if (record.transport !== "stdio") throw new Error(`${at}.transport must be "stdio"`)
+    return {
+      id: readString(record.id, `${at}.id`),
+      transport: "stdio" as const,
+      command: readString(record.command, `${at}.command`),
+      args: readStringArray(record.args, `${at}.args`),
+      envFrom: readStringRecord(record.envFrom, `${at}.envFrom`),
+      cwd: readOptionalString(record.cwd, `${at}.cwd`),
+      startupTimeoutMs: readPositiveInteger(record.startupTimeoutMs, `${at}.startupTimeoutMs`),
+      toolTimeoutMs: readPositiveInteger(record.toolTimeoutMs, `${at}.toolTimeoutMs`),
+      enabled: readBoolean(record.enabled, `${at}.enabled`),
+    }
+  })
+}
+
+function readStringRecord(value: unknown, name: string): Record<string, string> {
+  const record = readRecord(value, name)
+  return Object.fromEntries(
+    Object.entries(record).map(([key, item]) => [key, readString(item, `${name}.${key}`)]),
+  )
 }
 
 function readOptionalModelRef(value: unknown, name: string): ModelRef | undefined {
@@ -587,7 +696,25 @@ function readPermissionRules(value: unknown, name: string): PermissionRule[] {
     const action = readString(rule.action, `${name}[${index}].action`)
     const effect = readString(rule.effect, `${name}[${index}].effect`)
 
-    if (!["*", "read", "search", "execute", "edit", "network", "external_directory"].includes(action)) {
+    if (![
+      "*",
+      "read",
+      "search",
+      "execute",
+      "edit",
+      "network",
+      "delegate",
+      "external_directory",
+      "filesystem.read",
+      "filesystem.write",
+      "filesystem.external",
+      "process.execute",
+      "network.request",
+      "agent.delegate",
+      "session.update",
+      "user.interact",
+      "external.invoke",
+    ].includes(action)) {
       throw new Error(`${name}[${index}].action must be a permission action or "*"`)
     }
 

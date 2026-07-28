@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http"
 import { timingSafeEqual } from "node:crypto"
-import { AppError, BadRequestError, errorToJson, NotFoundError, UnauthorizedError } from "../shared/errors.js"
+import { AppError, BadRequestError, errorToJson, NotFoundError, UnauthorizedError } from "../../shared/errors.js"
 import {
   addUserPrompt,
   compactSession,
@@ -9,10 +9,10 @@ import {
   renameSession,
   updateSessionMode,
   type Runtime,
-} from "../core/runtime.js"
-import { normalizePromptFileMentions } from "../core/context/file-mentions.js"
-import { listSessionSnapshots, revertSessionSnapshots } from "../core/session/file-snapshots.js"
-import type { AgentMode } from "../core/config/schema.js"
+} from "../../core/runtime.js"
+import { normalizePromptFileMentions } from "../../core/context/file-mentions.js"
+import { listSessionSnapshots, revertSessionSnapshots } from "../../core/session/file-snapshots.js"
+import type { AgentMode } from "../../core/config/schema.js"
 import { writeSseStream } from "./sse.js"
 
 function capabilities(runtime: Runtime): { v: 1; features: string[] } {
