@@ -155,6 +155,71 @@ but it is not an encrypted vault. Environment variables remain the recommended
 way to supply provider keys. An explicitly selected SQLite configuration keeps
 using `.agent-cli/agent.db`.
 
+## TUI With A Self-Hosted vLLM Endpoint
+
+vLLM exposes an OpenAI-compatible API, so it works through the
+`openai-compatible` provider. The TUI accepts the same provider flags as `run`.
+
+One-off launch with the key in an environment variable:
+
+```bash
+export OPENAI_COMPATIBLE_API_KEY="<your-token>"
+npm run dev -- tui \
+  --provider openai-compatible \
+  --model <served-model-name> \
+  --base-url https://your-vllm-host:8000/v1
+```
+
+Use the exact model name vLLM serves. The base URL may end in `/v1`,
+`/v1/models`, or the full `/v1/chat/completions`; the provider normalizes it to
+the chat-completions route. The key is sent as `Authorization: Bearer <token>`,
+which matches vLLM's `--api-key` option. HTTPS needs no extra configuration.
+
+Persistent setup so that plain `npm run dev -- tui` works:
+
+1. Store the key once in the local key store:
+
+   ```bash
+   npm run dev -- keys set openai-compatible <your-token>
+   ```
+
+2. Create `agent-cli.config.json` in the workspace with the endpoint and model,
+   without the key:
+
+   ```json
+   {
+     "model": { "provider": "openai-compatible", "model": "<served-model-name>" },
+     "providers": {
+       "openaiCompatible": {
+         "baseUrl": "https://your-vllm-host:8000/v1",
+         "apiKeyEnv": "OPENAI_COMPATIBLE_API_KEY"
+       }
+     }
+   }
+   ```
+
+3. Run `npm run dev -- tui`.
+
+Key lookup order is `providers.openaiCompatible.apiKey`, then the variable named
+by `apiKeyEnv`, then `OPENAI_COMPATIBLE_API_KEY`, then `OPENAI_API_KEY`. Keys
+saved with `keys set` are injected into the provider config at startup.
+`--api-key <token>` and `--api-key-env <VAR>` are also accepted, but a flag
+value lands in shell history, so prefer the environment variable or key store.
+
+Notes:
+
+- If the vLLM host uses a self-signed or private-CA certificate, point Node at
+  the CA bundle before launching, otherwise the request fails with a
+  certificate error:
+
+  ```bash
+  export NODE_EXTRA_CA_CERTS=/path/to/ca.pem
+  ```
+
+- The TUI starts in ask mode, so shell, edit, and network tool calls prompt for
+  approval. Add `--allow-shell`, `--allow-edit`, or `--allow-network` to
+  pre-approve them for the session.
+
 ## Common Commands
 
 Run a prompt:
